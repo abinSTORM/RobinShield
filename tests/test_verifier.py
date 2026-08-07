@@ -1,4 +1,4 @@
-from verifier import get_contract_info
+from analysis.verifier import get_contract_info
 
 contract = "0xb0BAf0A19Da434DE5d40d91d3264978CC1997777"
 
