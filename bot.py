@@ -7,7 +7,7 @@ from telegram.ext import (
     filters,
 )
 from dotenv import load_dotenv
-from scanner import get_token_info
+from core.scanner import get_token_info
 
 import os
 
