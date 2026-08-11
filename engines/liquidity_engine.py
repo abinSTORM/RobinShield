@@ -1,4 +1,5 @@
 from core.token import get_token_decimals
+from core.price import get_eth_price_usd
 from web3 import Web3
 
 from config import RPC_URL
@@ -75,6 +76,9 @@ def analyze_liquidity(token_address):
 
     liquidity_eth = float(weth_amount) * 2
 
+    eth_price_usd = get_eth_price_usd()
+    liquidity_usd = liquidity_eth * eth_price_usd
+
     if liquidity_eth < 1:
         risk = "HIGH"
     elif liquidity_eth < 10:
@@ -90,6 +94,8 @@ def analyze_liquidity(token_address):
         "token_reserve": f"{token_reserve / (10 ** token_decimals):.18f}",
         "token_decimals": token_decimals,
         "liquidity_eth": round(liquidity_eth, 4),
+        "eth_price_usd": round(eth_price_usd, 2),
+        "liquidity_usd": round(liquidity_usd, 2),
         "risk": risk,
         "reason": "Uniswap V2 WETH liquidity pool detected.",
     }
