@@ -2,13 +2,16 @@ from engines.security_engine import security_scan
 from engines.risk_engine import calculate_score
 from engines.risk_engine import get_risk
 
-address = "0xb0BAf0A19Da434DE5d40d91d3264978CC1997777"
 
-report = security_scan(address)
+ADDRESS = "0xb0BAf0A19Da434DE5d40d91d3264978CC1997777"
+
+
+report = security_scan(ADDRESS)
 
 score = calculate_score(report)
 
 risk = get_risk(score)
+
 
 print()
 print("🛡 RobinShield Security Report")
@@ -19,20 +22,52 @@ print(f"Risk Level    : {risk}")
 
 print("=" * 40)
 
-for item in report:
 
-    icon = "✅"
+if isinstance(report, dict):
 
-    if item["status"] == "INFO":
+    items = report.get(
+        "security",
+        []
+    )
+
+else:
+
+    items = report
+
+
+for item in items:
+
+    if not isinstance(item, dict):
+        continue
+
+    status = str(
+        item.get(
+            "status",
+            "UNKNOWN"
+        )
+    ).upper()
+
+    icon = "ℹ️"
+
+    if status == "PASS":
+        icon = "✅"
+
+    elif status == "INFO":
         icon = "ℹ️"
 
-    elif item["status"] == "WARNING":
+    elif status == "WARNING":
         icon = "⚠️"
 
-    elif item["status"] == "FAIL":
+    elif status == "FAIL":
         icon = "❌"
 
     print()
-    print(f"{icon} {item['check']}")
-    print(f"Status : {item['status']}")
-    print(f"Reason : {item['reason']}")
+    print(
+        f"{icon} {item.get('check', 'Unknown')}"
+    )
+    print(
+        f"Status : {status}"
+    )
+    print(
+        f"Reason : {item.get('reason', '')}"
+    )
