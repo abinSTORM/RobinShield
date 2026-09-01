@@ -305,7 +305,7 @@ def analyze_trading_restrictions_bytecode(
     except Exception as e:
 
         result["status"] = "UNKNOWN"
-        result["risk"] = "HIGH"
+        result["risk"] = "UNKNOWN"
         result["confidence"] = "LOW"
 
         result["warnings"].append(
@@ -321,7 +321,8 @@ def analyze_trading_restrictions_bytecode(
     ):
 
         result["status"] = "UNKNOWN"
-        result["risk"] = "HIGH"
+        result["risk"] = "UNKNOWN"
+        result["confidence"] = "LOW"
 
         result["warnings"].append(
             "Bytecode analyzer returned an invalid result."
@@ -335,7 +336,7 @@ def analyze_trading_restrictions_bytecode(
     ):
 
         result["status"] = "UNAVAILABLE"
-        result["risk"] = "HIGH"
+        result["risk"] = "UNKNOWN"
         result["confidence"] = "LOW"
 
         result["warnings"].append(

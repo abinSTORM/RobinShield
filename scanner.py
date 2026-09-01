@@ -1186,7 +1186,7 @@ def analyze_tax_section(
 
     tax_analysis = {
         "status": "UNAVAILABLE",
-        "risk": "HIGH",
+        "risk": "UNKNOWN",
         "confidence": "LOW",
         "warnings": [],
         "signals": [],
@@ -1203,7 +1203,7 @@ def analyze_tax_section(
         )
 
         print(
-            "Risk: HIGH"
+            "Risk: UNKNOWN"
         )
 
         print(
@@ -1281,7 +1281,7 @@ def analyze_tax_section(
 
         tax_analysis = {
             "status": "UNKNOWN",
-            "risk": "HIGH",
+            "risk": "UNKNOWN",
             "confidence": "LOW",
             "warnings": [
                 f"Tax analysis failed: {e}"
@@ -1312,7 +1312,7 @@ def analyze_ownership_section(
 
     ownership_analysis = {
         "status": "UNAVAILABLE",
-        "risk": "HIGH",
+        "risk": "UNKNOWN",
         "confidence": "LOW",
         "warnings": [],
         "signals": [],
@@ -1329,7 +1329,7 @@ def analyze_ownership_section(
         )
 
         print(
-            "Risk: HIGH"
+            "Risk: UNKNOWN"
         )
 
         print(
@@ -1387,7 +1387,7 @@ def analyze_ownership_section(
 
         ownership_analysis = {
             "status": "UNKNOWN",
-            "risk": "HIGH",
+            "risk": "UNKNOWN",
             "confidence": "LOW",
             "warnings": [
                 f"Ownership analysis failed: {e}"
@@ -1418,7 +1418,7 @@ def analyze_trading_restrictions_section(
 
     trading_restrictions = {
         "status": "UNAVAILABLE",
-        "risk": "HIGH",
+        "risk": "UNKNOWN",
         "confidence": "LOW",
         "warnings": [],
         "signals": [],
@@ -1435,7 +1435,7 @@ def analyze_trading_restrictions_section(
         )
 
         print(
-            "Risk: HIGH"
+            "Risk: UNKNOWN"
         )
 
         print(
@@ -1473,7 +1473,7 @@ def analyze_trading_restrictions_section(
 
         trading_restrictions = {
             "status": "UNKNOWN",
-            "risk": "HIGH",
+            "risk": "UNKNOWN",
             "confidence": "LOW",
             "warnings": [
                 f"Trading restrictions analysis failed: {e}"

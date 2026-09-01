@@ -1,56 +1,55 @@
 # =========================================================
+# ROBINSHIELD OVERALL RISK ENGINE
+# =========================================================
+
+
+# =========================================================
 # SAFE HELPERS
 # =========================================================
 
 def _safe_dict(value):
-
     return value if isinstance(value, dict) else {}
 
 
 def _safe_list(value):
-
     return value if isinstance(value, list) else []
 
 
+def _status(value):
+    return str(
+        value or "UNKNOWN"
+    ).upper().strip()
+
+
 def _add_unique(items, message):
-
     if message and message not in items:
-
         items.append(message)
 
 
 # =========================================================
-# SECURITY
+# CONTRACT SECURITY
 # =========================================================
 
 def _security_penalty(
     security,
     warnings,
 ):
-
-    penalty = 0
-
     if isinstance(
         security,
         dict,
     ):
-
         security = security.get(
             "security",
-            []
+            [],
         )
 
     security = _safe_list(
         security
     )
 
+    penalty = 0
+
     if not security:
-
-        _add_unique(
-            warnings,
-            "Contract security results could not be determined.",
-        )
-
         return 0
 
     for item in security:
@@ -66,48 +65,144 @@ def _security_penalty(
                 "check",
                 "Unknown",
             )
-        )
+        ).strip()
 
-        status = str(
+        status = _status(
             item.get(
                 "status",
-                "UNKNOWN",
             )
-        ).upper()
+        )
 
-        if (
-            check.lower()
-            == "contract verification"
+        check_lower = check.lower()
+
+        # -------------------------------------------------
+        # Verification failure is uncertainty, not proof
+        # of malicious behavior.
+        # -------------------------------------------------
+
+        if check_lower in (
+            "contract verification",
+            "verification",
         ):
 
             if status == "FAIL":
-
-                penalty += 3
 
                 _add_unique(
                     warnings,
                     "Contract source verification failed.",
                 )
 
+                penalty += 3
+
             continue
+
+        # -------------------------------------------------
+        # Confirmed failures.
+        # -------------------------------------------------
 
         if status == "FAIL":
 
-            penalty += 20
+            if check_lower == "blacklist":
 
-            _add_unique(
-                warnings,
-                f"Contract security check failed: {check}.",
-            )
+                penalty += 25
+
+                _add_unique(
+                    warnings,
+                    "Potential blacklist functionality was detected.",
+                )
+
+            elif check_lower == "mint function":
+
+                penalty += 25
+
+                _add_unique(
+                    warnings,
+                    "Potential mint functionality was detected.",
+                )
+
+            elif check_lower == "pause functions":
+
+                penalty += 15
+
+                _add_unique(
+                    warnings,
+                    "Potential pause or freeze functionality was detected.",
+                )
+
+            elif check_lower in (
+                "trading controls",
+                "trading restrictions",
+            ):
+
+                penalty += 20
+
+                _add_unique(
+                    warnings,
+                    "Potential trading restrictions were detected.",
+                )
+
+            elif check_lower in (
+                "tax functions",
+                "tax",
+            ):
+
+                penalty += 15
+
+                _add_unique(
+                    warnings,
+                    "Potentially dangerous tax functionality was detected.",
+                )
+
+            elif check_lower == "ownership":
+
+                penalty += 12
+
+                _add_unique(
+                    warnings,
+                    "Potentially risky ownership controls were detected.",
+                )
+
+            else:
+
+                penalty += 15
+
+                _add_unique(
+                    warnings,
+                    f"Contract security check failed: {check}.",
+                )
+
+        # -------------------------------------------------
+        # Warnings are moderate evidence.
+        # -------------------------------------------------
 
         elif status == "WARNING":
 
-            penalty += 8
+            if check_lower == "blacklist":
+                penalty += 10
 
-            _add_unique(
-                warnings,
-                f"Contract security warning: {check}.",
-            )
+            elif check_lower == "mint function":
+                penalty += 10
+
+            elif check_lower == "pause functions":
+                penalty += 8
+
+            elif check_lower in (
+                "trading controls",
+                "trading restrictions",
+            ):
+                penalty += 10
+
+            elif check_lower in (
+                "tax functions",
+                "tax",
+            ):
+                penalty += 5
+
+            elif check_lower == "ownership":
+                penalty += 5
+
+            else:
+                penalty += 5
 
     return min(
         penalty,
@@ -123,7 +218,6 @@ def _liquidity_penalty(
     liquidity,
     warnings,
 ):
-
     liquidity = _safe_dict(
         liquidity
     )
@@ -132,43 +226,36 @@ def _liquidity_penalty(
         "found"
     )
 
-    risk = str(
+    risk = _status(
         liquidity.get(
             "risk",
-            "UNKNOWN",
         )
-    ).upper()
+    )
 
     liquidity_usd = liquidity.get(
         "liquidity_usd",
-        0,
+        liquidity.get(
+            "total_liquidity_usd",
+            liquidity.get(
+                "total_discovered_liquidity_usd",
+                0,
+            ),
+        ),
     )
 
     try:
-
         liquidity_usd = float(
             liquidity_usd or 0
         )
-
     except (
         TypeError,
         ValueError,
     ):
-
-        liquidity_usd = 0
+        liquidity_usd = 0.0
 
     # -----------------------------------------------------
-    # Unknown / unavailable is uncertainty, not danger.
+    # No pool / unavailable.
     # -----------------------------------------------------
-
-    if found is None:
-
-        _add_unique(
-            warnings,
-            "Liquidity detection status is unknown.",
-        )
-
-        return 0
 
     if found is False:
 
@@ -179,8 +266,17 @@ def _liquidity_penalty(
 
         return 5
 
+    if found is None:
+
+        _add_unique(
+            warnings,
+            "Liquidity detection status is unknown.",
+        )
+
+        return 0
+
     # -----------------------------------------------------
-    # Actual liquidity risk.
+    # Explicit engine classification.
     # -----------------------------------------------------
 
     if risk == "HIGH":
@@ -206,17 +302,130 @@ def _liquidity_penalty(
         return 0
 
     # -----------------------------------------------------
-    # Pool exists but value unknown.
+    # Fallback by actual liquidity value.
     # -----------------------------------------------------
 
-    if liquidity_usd <= 0:
+    if liquidity_usd > 0:
+
+        if liquidity_usd < 1000:
+
+            _add_unique(
+                warnings,
+                "Liquidity is very low.",
+            )
+
+            return 30
+
+        if liquidity_usd < 10000:
+
+            _add_unique(
+                warnings,
+                "Liquidity is relatively low.",
+            )
+
+            return 18
+
+    return 0
+
+
+# =========================================================
+# HOLDER RISK
+# =========================================================
+
+def _holder_penalty(
+    holders,
+    warnings,
+):
+    holders = _safe_dict(
+        holders
+    )
+
+    level = _status(
+        holders.get(
+            "risk",
+            holders.get(
+                "level",
+                holders.get(
+                    "holder_risk",
+                    "UNKNOWN",
+                ),
+            ),
+        )
+    )
+
+    verified = bool(
+        holders.get(
+            "_verified",
+            holders.get(
+                "verified",
+                False,
+            ),
+        )
+    )
+
+    complete = bool(
+        holders.get(
+            "_complete",
+            False,
+        )
+    )
+
+    coverage = _status(
+        holders.get(
+            "coverage",
+            "",
+        )
+    )
+
+    # -----------------------------------------------------
+    # Partial/unknown coverage.
+    #
+    # Do not invent a concentration risk from incomplete
+    # data.
+    # -----------------------------------------------------
+
+    if (
+        not verified
+        or not complete
+        or coverage == "PARTIAL"
+    ):
 
         _add_unique(
             warnings,
-            "Liquidity value could not be reliably determined.",
+            "Holder distribution could not be fully verified.",
         )
 
         return 0
+
+    if level in (
+        "UNKNOWN",
+        "UNAVAILABLE",
+        "",
+    ):
+
+        return 0
+
+    if level == "LOW":
+
+        return 0
+
+    if level == "MEDIUM":
+
+        _add_unique(
+            warnings,
+            "Holder concentration is moderate.",
+        )
+
+        return 10
+
+    if level == "HIGH":
+
+        _add_unique(
+            warnings,
+            "Token ownership is highly concentrated.",
+        )
+
+        return 25
 
     return 0
 
@@ -229,23 +438,22 @@ def _lp_penalty(
     lp_safety,
     warnings,
 ):
-
     lp_safety = _safe_dict(
         lp_safety
     )
 
-    safety = str(
+    safety = _status(
         lp_safety.get(
             "safety",
             lp_safety.get(
                 "risk",
                 "UNKNOWN",
-            )
+            ),
         )
-    ).upper()
+    )
 
     # -----------------------------------------------------
-    # UNKNOWN MUST NOT BE TREATED AS DANGEROUS.
+    # Unknown is uncertainty.
     # -----------------------------------------------------
 
     if safety in (
@@ -254,17 +462,13 @@ def _lp_penalty(
         "",
     ):
 
-        _add_unique(
-            warnings,
-            "LP safety could not be determined.",
-        )
-
         return 0
 
     if safety in (
         "VERY HIGH",
         "HIGH",
         "SAFE",
+        "PASS",
     ):
 
         return 0
@@ -291,124 +495,6 @@ def _lp_penalty(
 
 
 # =========================================================
-# HOLDER RISK
-# =========================================================
-
-def _holder_penalty(
-    holders,
-    warnings,
-):
-
-    holders = _safe_dict(
-        holders
-    )
-
-    level = str(
-        holders.get(
-            "risk",
-            holders.get(
-                "level",
-                holders.get(
-                    "holder_risk",
-                    "UNKNOWN",
-                )
-            )
-        )
-    ).upper()
-
-    coverage = str(
-        holders.get(
-            "coverage",
-            "UNKNOWN",
-        )
-    ).upper()
-
-    verified = bool(
-        holders.get(
-            "verified",
-            holders.get(
-                "_verified",
-                False,
-            )
-        )
-    )
-
-    complete = bool(
-        holders.get(
-            "_complete",
-            False,
-        )
-    )
-
-    # -----------------------------------------------------
-    # COMPLETE + VERIFIED
-    # -----------------------------------------------------
-
-    if (
-        complete
-        and verified
-        and coverage == "COMPLETE"
-    ):
-
-        if level == "LOW":
-
-            return 0
-
-        if level == "MEDIUM":
-
-            _add_unique(
-                warnings,
-                "Holder concentration is moderate.",
-            )
-
-            return 12
-
-        if level == "HIGH":
-
-            _add_unique(
-                warnings,
-                "Token ownership is highly concentrated.",
-            )
-
-            return 25
-
-        _add_unique(
-            warnings,
-            "Holder risk classification is unknown.",
-        )
-
-        return 0
-
-    # -----------------------------------------------------
-    # PARTIAL / UNVERIFIED
-    # -----------------------------------------------------
-
-    if (
-        coverage == "PARTIAL"
-        or not complete
-        or not verified
-    ):
-
-        _add_unique(
-            warnings,
-            "Holder distribution could not be fully verified.",
-        )
-
-        return 0
-
-    # -----------------------------------------------------
-    # UNKNOWN
-    # -----------------------------------------------------
-
-    _add_unique(
-        warnings,
-        "Holder distribution could not be determined.",
-    )
-
-    return 0
-
-
-# =========================================================
 # TAX
 # =========================================================
 
@@ -416,24 +502,25 @@ def _tax_penalty(
     tax_analysis,
     warnings,
 ):
-
-    tax_analysis = _safe_dict(
+    data = _safe_dict(
         tax_analysis
     )
 
-    status = str(
-        tax_analysis.get(
+    status = _status(
+        data.get(
             "status",
-            "UNKNOWN",
         )
-    ).upper()
+    )
 
-    risk = str(
-        tax_analysis.get(
+    risk = _status(
+        data.get(
             "risk",
-            "UNKNOWN",
         )
-    ).upper()
+    )
+
+    # -----------------------------------------------------
+    # Explicit high-risk analysis.
+    # -----------------------------------------------------
 
     if (
         status == "FAIL"
@@ -456,26 +543,27 @@ def _tax_penalty(
 
         return 10
 
-    # A measured low tax with WARNING status
-    # is only a small informational penalty.
+    # -----------------------------------------------------
+    # WARNING + LOW = informational.
+    # -----------------------------------------------------
+
     if (
         status == "WARNING"
-        and risk == "LOW"
+        and
+        risk == "LOW"
     ):
 
         return 3
 
-    # Unknown tax analysis = uncertainty.
+    # -----------------------------------------------------
+    # Unknown ABI / unavailable analysis.
+    # -----------------------------------------------------
+
     if status in (
         "UNKNOWN",
         "UNAVAILABLE",
         "",
     ):
-
-        _add_unique(
-            warnings,
-            "Tax behavior could not be fully determined.",
-        )
 
         return 0
 
@@ -490,24 +578,21 @@ def _ownership_penalty(
     ownership,
     warnings,
 ):
-
     ownership = _safe_dict(
         ownership
     )
 
-    status = str(
+    status = _status(
         ownership.get(
             "status",
-            "UNKNOWN",
         )
-    ).upper()
+    )
 
-    risk = str(
+    risk = _status(
         ownership.get(
             "risk",
-            "UNKNOWN",
         )
-    ).upper()
+    )
 
     if (
         status == "FAIL"
@@ -525,7 +610,7 @@ def _ownership_penalty(
 
         _add_unique(
             warnings,
-            "Token retains potentially significant admin control.",
+            "Token retains potentially significant administrative control.",
         )
 
         return 8
@@ -541,24 +626,21 @@ def _trade_safety_penalty(
     trade_safety,
     warnings,
 ):
-
     trade_safety = _safe_dict(
         trade_safety
     )
 
-    status = str(
+    status = _status(
         trade_safety.get(
             "status",
-            "UNKNOWN",
         )
-    ).upper()
+    )
 
-    risk = str(
+    risk = _status(
         trade_safety.get(
             "risk",
-            "UNKNOWN",
         )
-    ).upper()
+    )
 
     if (
         status == "FAIL"
@@ -567,15 +649,12 @@ def _trade_safety_penalty(
 
         _add_unique(
             warnings,
-            "Trade safety analysis detected high-risk behavior.",
+            "Trade safety analysis detected dangerous restrictions.",
         )
 
         return 25
 
-    if (
-        status == "WARNING"
-        and risk == "MEDIUM"
-    ):
+    if risk == "MEDIUM":
 
         _add_unique(
             warnings,
@@ -586,7 +665,8 @@ def _trade_safety_penalty(
 
     if (
         status == "WARNING"
-        and risk == "LOW"
+        and
+        risk == "LOW"
     ):
 
         return 2
@@ -602,46 +682,41 @@ def _simulation_penalty(
     simulation,
     warnings,
 ):
-
     simulation = _safe_dict(
         simulation
     )
 
-    status = str(
+    status = _status(
         simulation.get(
             "status",
-            "UNKNOWN",
         )
-    ).upper()
+    )
 
-    risk = str(
+    risk = _status(
         simulation.get(
             "risk",
-            "UNKNOWN",
         )
-    ).upper()
+    )
 
     buy = _safe_dict(
         simulation.get(
-            "buy"
+            "buy",
         )
     )
 
     sell = _safe_dict(
         simulation.get(
-            "sell"
+            "sell",
         )
     )
 
-    buy_success = buy.get(
-        "success"
-    )
+    # -----------------------------------------------------
+    # Actual SELL failure is strong evidence.
+    # -----------------------------------------------------
 
-    sell_success = sell.get(
+    if sell.get(
         "success"
-    )
-
-    if sell_success is False:
+    ) is False:
 
         _add_unique(
             warnings,
@@ -650,7 +725,13 @@ def _simulation_penalty(
 
         return 30
 
-    if buy_success is False:
+    # -----------------------------------------------------
+    # BUY failure.
+    # -----------------------------------------------------
+
+    if buy.get(
+        "success"
+    ) is False:
 
         _add_unique(
             warnings,
@@ -659,18 +740,14 @@ def _simulation_penalty(
 
         return 15
 
-    # Unknown or unavailable = no danger penalty.
-    if status in (
-        "UNKNOWN",
-        "UNAVAILABLE",
-        "SKIPPED",
-    ):
-
-        return 0
+    # -----------------------------------------------------
+    # Explicit high-risk warning.
+    # -----------------------------------------------------
 
     if (
         status == "WARNING"
-        and risk == "HIGH"
+        and
+        risk == "HIGH"
     ):
 
         _add_unique(
@@ -693,60 +770,55 @@ def _simulation_penalty(
 
 
 # =========================================================
-# HONEYPOT
+# HONEYPOT / SELLABILITY
 # =========================================================
 
 def _honeypot_penalty(
     honeypot,
     warnings,
 ):
-
     honeypot = _safe_dict(
         honeypot
     )
 
-    status = str(
+    status = _status(
         honeypot.get(
             "status",
-            "UNKNOWN",
         )
-    ).upper()
+    )
 
-    risk = str(
+    risk = _status(
         honeypot.get(
             "risk",
-            "UNKNOWN",
         )
-    ).upper()
+    )
 
-    confidence = str(
+    confidence = _status(
         honeypot.get(
             "confidence",
             "LOW",
         )
-    ).upper()
+    )
 
     buy = _safe_dict(
         honeypot.get(
-            "buy"
+            "buy",
         )
     )
 
     sell = _safe_dict(
         honeypot.get(
-            "sell"
+            "sell",
         )
-    )
-
-    sell_success = sell.get(
-        "success"
     )
 
     # -----------------------------------------------------
     # Actual SELL-side failure.
     # -----------------------------------------------------
 
-    if sell_success is False:
+    if sell.get(
+        "success"
+    ) is False:
 
         _add_unique(
             warnings,
@@ -760,7 +832,7 @@ def _honeypot_penalty(
         return 25
 
     # -----------------------------------------------------
-    # Explicit failure.
+    # Explicit analysis failure.
     # -----------------------------------------------------
 
     if status == "FAIL":
@@ -772,13 +844,10 @@ def _honeypot_penalty(
 
         return 30
 
-    # -----------------------------------------------------
-    # High risk.
-    # -----------------------------------------------------
-
     if (
         risk == "HIGH"
-        and status not in (
+        and
+        status not in (
             "UNKNOWN",
             "UNAVAILABLE",
         )
@@ -790,10 +859,6 @@ def _honeypot_penalty(
         )
 
         return 25
-
-    # -----------------------------------------------------
-    # Warning.
-    # -----------------------------------------------------
 
     if status == "WARNING":
 
@@ -809,108 +874,164 @@ def _honeypot_penalty(
         return 6
 
     # -----------------------------------------------------
-    # Unknown/unavailable = zero risk penalty.
+    # Unknown / unavailable = no danger penalty.
+    # -----------------------------------------------------
+
+    return 0
+
+
+# =========================================================
+# DEEP SWAP EXECUTION
+# =========================================================
+
+def _swap_execution_penalty(
+    swap_simulation,
+    warnings,
+):
+    swap_simulation = _safe_dict(
+        swap_simulation
+    )
+
+    status = _status(
+        swap_simulation.get(
+            "status",
+        )
+    )
+
+    risk = _status(
+        swap_simulation.get(
+            "risk",
+        )
+    )
+
+    tested = swap_simulation.get(
+        "tested",
+        False,
+    )
+
+    # -----------------------------------------------------
+    # Successful deep execution.
+    # -----------------------------------------------------
+
+    if (
+        status == "PASS"
+        and
+        risk == "LOW"
+        and
+        tested is True
+    ):
+
+        return 0
+
+    # -----------------------------------------------------
+    # Unknown / skipped.
     # -----------------------------------------------------
 
     if status in (
         "UNKNOWN",
         "UNAVAILABLE",
+        "SKIPPED",
+        "",
+    ):
+
+        return 0
+
+    if (
+        status == "FAIL"
+        or
+        risk == "HIGH"
     ):
 
         _add_unique(
             warnings,
-            "Honeypot / sellability could not be fully determined.",
+            "Deep router swap execution simulation detected a high-risk failure.",
         )
 
-        return 0
+        return 25
+
+    if (
+        status == "WARNING"
+        and
+        risk == "MEDIUM"
+    ):
+
+        _add_unique(
+            warnings,
+            "Deep router swap execution simulation returned a warning.",
+        )
+
+        return 12
+
+    if status == "WARNING":
+
+        _add_unique(
+            warnings,
+            "Deep router swap execution simulation returned a warning.",
+        )
+
+        return 5
 
     return 0
 
 
-    # -----------------------------------------------------
-    # DEEP ROUTER
-    # -----------------------------------------------------
+# =========================================================
+# PROXY
+# =========================================================
 
-    if (
-        swap_simulation.get(
-            "status"
-        ) == "PASS"
-        and
-        swap_simulation.get(
-            "risk"
-        ) == "LOW"
-        and
-        swap_simulation.get(
-            "tested"
-        ) is True
+def _proxy_penalty(
+    proxy,
+    implementation,
+    warnings,
+):
+    proxy = _safe_dict(
+        proxy
+    )
+
+    implementation = _safe_dict(
+        implementation
+    )
+
+    if not proxy.get(
+        "detected",
+        False,
     ):
 
+        return 0
+
+    proxy_type = proxy.get(
+        "type",
+        "UNKNOWN",
+    )
+
+    _add_unique(
+        warnings,
+        f"Token uses an {proxy_type} proxy.",
+    )
+
+    implementation_address = (
+        proxy.get(
+            "implementation"
+        )
+    )
+
+    if implementation_address:
+
         _add_unique(
-            positives,
-            "Deep router SELL execution succeeded in a temporary fork.",
+            warnings,
+            f"Proxy implementation: {implementation_address}",
         )
 
-        # -------------------------------------------------
-        # BUY execution
-        # -------------------------------------------------
+    # -----------------------------------------------------
+    # A proxy is complexity, not proof of maliciousness.
+    # -----------------------------------------------------
 
-        buy_tests = swap_simulation.get(
-            "buy_tests",
-            []
-        )
+    if implementation.get(
+        "verified"
+    ) is True:
 
-        buy_passed = 0
-        buy_failed = 0
+        return 2
 
-        if isinstance(
-            buy_tests,
-            list,
-        ):
-
-            for test in buy_tests:
-
-                if not isinstance(
-                    test,
-                    dict,
-                ):
-
-                    continue
-
-                if test.get(
-                    "success"
-                ) is True:
-
-                    buy_passed += 1
-
-                else:
-
-                    buy_failed += 1
-
-        # If the simulator exposes an explicit BUY success
-        # flag, prefer that.
-        deep_buy_success = (
-            swap_simulation.get(
-                "buy_success"
-            )
-        )
-
-        if deep_buy_success is True:
-
-            _add_unique(
-                positives,
-                "Deep router BUY execution succeeded in a temporary fork.",
-            )
-
-        elif (
-            buy_tests
-            and buy_failed == 0
-            and buy_passed > 0
-        ):
-
-            _add_unique(
-                positives,
-                "Deep router BUY execution succeeded in a temporary fork.",
-            )
+    return 3
 
 
 # =========================================================
@@ -926,7 +1047,6 @@ def _positive_signals(
     honeypot,
     swap_simulation=None,
 ):
-
     positives = []
 
     liquidity = _safe_dict(
@@ -957,12 +1077,11 @@ def _positive_signals(
     # LIQUIDITY
     # -----------------------------------------------------
 
-    if str(
+    if _status(
         liquidity.get(
             "risk",
-            "",
         )
-    ).upper() == "LOW":
+    ) == "LOW":
 
         _add_unique(
             positives,
@@ -970,34 +1089,65 @@ def _positive_signals(
         )
 
     # -----------------------------------------------------
-    # LP SAFETY
+    # LP
     # -----------------------------------------------------
 
-    if str(
+    if _status(
         lp_safety.get(
             "safety",
-            "",
         )
-    ).upper() in (
+    ) in (
         "VERY HIGH",
         "HIGH",
         "SAFE",
         "PASS",
     ):
 
-        _add_unique(
-            positives,
-            "Almost all LP tokens are burned.",
+        burned = lp_safety.get(
+            "burn_percentage"
         )
+
+        if burned is not None:
+
+            try:
+                burned_value = float(
+                    burned
+                )
+            except (
+                TypeError,
+                ValueError,
+            ):
+                burned_value = 0
+
+            if burned_value >= 99:
+
+                _add_unique(
+                    positives,
+                    "Almost all LP tokens are burned.",
+                )
+
+            else:
+
+                _add_unique(
+                    positives,
+                    "LP safety appears strong.",
+                )
+
+        else:
+
+            _add_unique(
+                positives,
+                "LP safety appears strong.",
+            )
 
     # -----------------------------------------------------
     # HOLDERS
     #
-    # Only claim healthy distribution when coverage is
-    # actually complete and verified.
+    # Only call distribution healthy if coverage is
+    # complete and verified.
     # -----------------------------------------------------
 
-    holder_level = str(
+    holder_level = _status(
         holders.get(
             "risk",
             holders.get(
@@ -1008,14 +1158,7 @@ def _positive_signals(
                 ),
             ),
         )
-    ).upper()
-
-    holder_coverage = str(
-        holders.get(
-            "coverage",
-            "",
-        )
-    ).upper()
+    )
 
     holder_verified = bool(
         holders.get(
@@ -1034,11 +1177,21 @@ def _positive_signals(
         )
     )
 
+    holder_coverage = _status(
+        holders.get(
+            "coverage",
+            "",
+        )
+    )
+
     if (
         holder_level == "LOW"
-        and holder_verified
-        and holder_complete
-        and holder_coverage == "COMPLETE"
+        and
+        holder_verified
+        and
+        holder_complete
+        and
+        holder_coverage == "COMPLETE"
     ):
 
         _add_unique(
@@ -1055,18 +1208,22 @@ def _positive_signals(
         dict,
     ):
 
-        security = security.get(
+        security_items = security.get(
             "security",
             [],
         )
 
-    security = _safe_list(
-        security
+    else:
+
+        security_items = security
+
+    security_items = _safe_list(
+        security_items
     )
 
-    failures = []
+    security_failures = []
 
-    for item in security:
+    for item in security_items:
 
         if not isinstance(
             item,
@@ -1075,12 +1232,11 @@ def _positive_signals(
 
             continue
 
-        status = str(
+        status = _status(
             item.get(
                 "status",
-                "",
             )
-        ).upper()
+        )
 
         check = str(
             item.get(
@@ -1095,13 +1251,14 @@ def _positive_signals(
             check != "contract verification"
         ):
 
-            failures.append(
+            security_failures.append(
                 item
             )
 
     if (
-        security
-        and not failures
+        security_items
+        and
+        not security_failures
     ):
 
         _add_unique(
@@ -1115,13 +1272,13 @@ def _positive_signals(
 
     buy = _safe_dict(
         simulation.get(
-            "buy"
+            "buy",
         )
     )
 
     sell = _safe_dict(
         simulation.get(
-            "sell"
+            "sell",
         )
     )
 
@@ -1141,18 +1298,18 @@ def _positive_signals(
         )
 
     # -----------------------------------------------------
-    # HONEYPOT / TRANSFER SIMULATION
+    # HONEYPOT
     # -----------------------------------------------------
 
     hp_buy = _safe_dict(
         honeypot.get(
-            "buy"
+            "buy",
         )
     )
 
     hp_sell = _safe_dict(
         honeypot.get(
-            "sell"
+            "sell",
         )
     )
 
@@ -1172,33 +1329,73 @@ def _positive_signals(
         )
 
     # -----------------------------------------------------
-    # DEEP ROUTER EXECUTION
+    # DEEP ROUTER
     # -----------------------------------------------------
 
+    deep_status = _status(
+        swap_simulation.get(
+            "status",
+        )
+    )
+
+    deep_risk = _status(
+        swap_simulation.get(
+            "risk",
+        )
+    )
+
+    deep_tested = (
+        swap_simulation.get(
+            "tested",
+            False,
+        )
+        is True
+    )
+
     if (
-        swap_simulation.get(
-            "status"
-        ) == "PASS"
+        deep_status == "PASS"
         and
-        swap_simulation.get(
-            "risk"
-        ) == "LOW"
+        deep_risk == "LOW"
         and
-        swap_simulation.get(
-            "tested"
-        ) is True
+        deep_tested
     ):
 
-        _add_unique(
-            positives,
-            "Deep router SELL execution succeeded in a temporary fork.",
+        # Look for explicit simulator evidence first.
+        signals = _safe_list(
+            swap_simulation.get(
+                "signals",
+                [],
+            )
         )
 
-        # BUY result can be exposed directly by the simulator.
+        signal_text = " ".join(
+            str(signal).lower()
+            for signal in signals
+        )
+
+        if (
+            "sell succeeded across all"
+            in signal_text
+            or
+            "deep sell" in signal_text
+        ):
+
+            _add_unique(
+                positives,
+                "Deep router SELL execution succeeded in a temporary fork.",
+            )
+
+        # BUY
         if (
             swap_simulation.get(
                 "buy_success"
             ) is True
+            or
+            "buy succeeded across all"
+            in signal_text
+            or
+            "deep buy and sell router execution both succeeded"
+            in signal_text
         ):
 
             _add_unique(
@@ -1206,42 +1403,10 @@ def _positive_signals(
                 "Deep router BUY execution succeeded in a temporary fork.",
             )
 
-        else:
-
-            buy_tests = swap_simulation.get(
-                "buy_tests",
-                [],
-            )
-
-            if (
-                isinstance(
-                    buy_tests,
-                    list,
-                )
-                and buy_tests
-                and all(
-                    isinstance(
-                        test,
-                        dict,
-                    )
-                    and
-                    test.get(
-                        "success"
-                    ) is True
-                    for test in buy_tests
-                )
-            ):
-
-                _add_unique(
-                    positives,
-                    "Deep router BUY execution succeeded in a temporary fork.",
-                )
-
-        # Combined signal when both are explicitly confirmed.
+        # Combined result.
         if (
-            swap_simulation.get(
-                "buy_success"
-            ) is True
+            "deep buy and sell router execution both succeeded"
+            in signal_text
         ):
 
             _add_unique(
@@ -1250,116 +1415,11 @@ def _positive_signals(
             )
 
     # -----------------------------------------------------
-    # IMPORTANT
-    #
-    # Always return a list.
+    # ALWAYS RETURN A LIST
     # -----------------------------------------------------
 
     return positives
 
-# =====================================================
-# DEEP SWAP EXECUTION
-# =====================================================
-
-def _swap_execution_penalty(
-    swap_simulation,
-    warnings,
-):
-
-    swap_simulation = _safe_dict(
-        swap_simulation
-    )
-
-    status = str(
-        swap_simulation.get(
-            "status",
-            "UNKNOWN",
-        )
-    ).upper()
-
-    risk = str(
-        swap_simulation.get(
-            "risk",
-            "UNKNOWN",
-        )
-    ).upper()
-
-    tested = swap_simulation.get(
-        "tested",
-        False,
-    )
-
-    # -----------------------------------------------------
-    # Successful deep execution.
-    # -----------------------------------------------------
-
-    if (
-        status == "PASS"
-        and
-        risk == "LOW"
-        and
-        tested is True
-    ):
-
-        return 0
-
-    # -----------------------------------------------------
-    # Infrastructure / unavailable.
-    #
-    # Do NOT treat this as token danger.
-    # -----------------------------------------------------
-
-    if status in (
-        "UNKNOWN",
-        "UNAVAILABLE",
-        "SKIPPED",
-    ):
-
-        return 0
-
-    # -----------------------------------------------------
-    # Explicit high-risk execution failure.
-    # -----------------------------------------------------
-
-    if (
-        status == "FAIL"
-        or risk == "HIGH"
-    ):
-
-        _add_unique(
-            warnings,
-            "Deep router swap execution simulation detected a high-risk failure.",
-        )
-
-        return 25
-
-    # -----------------------------------------------------
-    # Partial / warning result.
-    # -----------------------------------------------------
-
-    if (
-        status == "WARNING"
-        and
-        risk == "MEDIUM"
-    ):
-
-        _add_unique(
-            warnings,
-            "Deep router swap execution simulation returned a warning.",
-        )
-
-        return 12
-
-    if status == "WARNING":
-
-        _add_unique(
-            warnings,
-            "Deep router swap execution simulation returned a warning.",
-        )
-
-        return 5
-
-    return 0
 
 # =========================================================
 # MAIN
@@ -1397,13 +1457,11 @@ def calculate_overall_risk(
     implementation=None,
     implementation_info=None,
 
-    **kwargs
+    **kwargs,
 ):
 
     """
     RobinShield overall risk calculator.
-
-    Important design rule:
 
     UNKNOWN / UNAVAILABLE
         = lack of evidence
@@ -1413,7 +1471,7 @@ def calculate_overall_risk(
     """
 
     # =====================================================
-    # NORMALIZE
+    # NORMALIZE ALTERNATE ARGUMENT NAMES
     # =====================================================
 
     if not holders:
@@ -1445,8 +1503,8 @@ def calculate_overall_risk(
         liquidity = kwargs.get(
             "liquidity_result",
             kwargs.get(
-                "liquidity_data"
-            )
+                "liquidity_data",
+            ),
         )
 
     if not lp_safety:
@@ -1456,9 +1514,9 @@ def calculate_overall_risk(
             kwargs.get(
                 "lp_result",
                 kwargs.get(
-                    "lp_safety_result"
-                )
-            )
+                    "lp_safety_result",
+                ),
+            ),
         )
 
     if not holders:
@@ -1468,9 +1526,9 @@ def calculate_overall_risk(
             kwargs.get(
                 "holder_data",
                 kwargs.get(
-                    "holders_result"
-                )
-            )
+                    "holders_result",
+                ),
+            ),
         )
 
     if not security:
@@ -1478,8 +1536,8 @@ def calculate_overall_risk(
         security = kwargs.get(
             "contract_security",
             kwargs.get(
-                "security_result"
-            )
+                "security_result",
+            ),
         )
 
     if not tax_analysis:
@@ -1487,20 +1545,20 @@ def calculate_overall_risk(
         tax_analysis = kwargs.get(
             "tax",
             kwargs.get(
-                "tax_result"
-            )
+                "tax_result",
+            ),
         )
 
     if not ownership:
 
         ownership = kwargs.get(
-            "ownership_result"
+            "ownership_result",
         )
 
     if not trade_safety:
 
         trade_safety = kwargs.get(
-            "trade_safety_result"
+            "trade_safety_result",
         )
 
     if not trade_simulation:
@@ -1508,8 +1566,8 @@ def calculate_overall_risk(
         trade_simulation = kwargs.get(
             "simulation",
             kwargs.get(
-                "simulation_result"
-            )
+                "simulation_result",
+            ),
         )
 
     if not honeypot:
@@ -1517,8 +1575,8 @@ def calculate_overall_risk(
         honeypot = kwargs.get(
             "honeypot_result",
             kwargs.get(
-                "sellability"
-            )
+                "sellability",
+            ),
         )
 
     if not swap_simulation:
@@ -1528,9 +1586,9 @@ def calculate_overall_risk(
             kwargs.get(
                 "swap_result",
                 kwargs.get(
-                    "swap_simulation_result"
-                )
-            )
+                    "swap_simulation_result",
+                ),
+            ),
         )
 
     # =====================================================
@@ -1608,7 +1666,7 @@ def calculate_overall_risk(
                 penalty
             ),
             100,
-        )
+        ),
     )
 
     score = 100 - penalty
@@ -1620,11 +1678,11 @@ def calculate_overall_risk(
                 score
             ),
             100,
-        )
+        ),
     )
 
     # =====================================================
-    # RISK
+    # RISK LEVEL
     # =====================================================
 
     if score >= 80:
@@ -1654,7 +1712,7 @@ def calculate_overall_risk(
     )
 
     # =====================================================
-    # RETURN RESULT
+    # RETURN
     # =====================================================
 
     return {
@@ -1664,83 +1722,26 @@ def calculate_overall_risk(
         "positive_signals": positives,
     }
 
-# =========================================================
-# PROXY PENALTY
-# =========================================================
-
-def _proxy_penalty(
-    proxy,
-    implementation,
-    warnings,
-):
-
-    proxy = _safe_dict(
-        proxy
-    )
-
-    implementation = _safe_dict(
-        implementation
-    )
-
-    if not proxy.get(
-        "detected"
-    ):
-
-        return 0
-
-    proxy_type = proxy.get(
-        "type",
-        "UNKNOWN",
-    )
-
-    implementation_address = proxy.get(
-        "implementation"
-    )
-
-    _add_unique(
-        warnings,
-        f"Token uses an {proxy_type} proxy.",
-    )
-
-    if implementation_address:
-
-        _add_unique(
-            warnings,
-            f"Proxy implementation: {implementation_address}",
-        )
-
-    # Verified implementation = smaller complexity
-    # penalty than an unverified implementation.
-    if implementation.get(
-        "verified"
-    ) is True:
-
-        return 2
-
-    return 5
-
 
 # =========================================================
-# COMPATIBILITY
+# COMPATIBILITY WRAPPERS
 # =========================================================
 
 def analyze(
     *args,
-    **kwargs
+    **kwargs,
 ):
-
     return calculate_overall_risk(
         *args,
-        **kwargs
+        **kwargs,
     )
 
 
 def get_overall_risk(
     *args,
-    **kwargs
+    **kwargs,
 ):
-
     return calculate_overall_risk(
         *args,
-        **kwargs
+        **kwargs,
     )

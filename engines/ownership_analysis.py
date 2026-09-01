@@ -253,7 +253,7 @@ def analyze_ownership_bytecode(
     except Exception as e:
 
         result["status"] = "UNKNOWN"
-        result["risk"] = "HIGH"
+        result["risk"] = "UNKNOWN"
         result["confidence"] = "LOW"
 
         result["warnings"].append(
@@ -266,7 +266,7 @@ def analyze_ownership_bytecode(
     if not bytecode_result:
 
         result["status"] = "UNKNOWN"
-        result["risk"] = "HIGH"
+        result["risk"] = "UNKNOWN"
         result["confidence"] = "LOW"
 
         result["warnings"].append(
@@ -281,7 +281,7 @@ def analyze_ownership_bytecode(
     ):
 
         result["status"] = "UNAVAILABLE"
-        result["risk"] = "HIGH"
+        result["risk"] = "UNKNOWN"
         result["confidence"] = "LOW"
 
         result["warnings"].append(

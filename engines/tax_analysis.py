@@ -15,6 +15,7 @@ BUY_TAX_FUNCTIONS = [
     "getBuyTaxRate",
 ]
 
+
 SELL_TAX_FUNCTIONS = [
     "sellTaxRate",
     "sellTax",
@@ -22,12 +23,14 @@ SELL_TAX_FUNCTIONS = [
     "getSellTaxRate",
 ]
 
+
 GENERAL_TAX_FUNCTIONS = [
     "taxRate",
     "tax",
     "totalTax",
     "feeRate",
 ]
+
 
 TAX_SETTER_FUNCTIONS = [
     "setTax",
@@ -47,7 +50,9 @@ TAX_SETTER_FUNCTIONS = [
 def get_web3():
 
     w3 = Web3(
-        Web3.HTTPProvider(RPC_URL)
+        Web3.HTTPProvider(
+            RPC_URL
+        )
     )
 
     if not w3.is_connected():
@@ -69,17 +74,28 @@ def find_function_abi(
 ):
 
     if not abi:
+
         return None
 
     for item in abi:
 
-        if not isinstance(item, dict):
+        if not isinstance(
+            item,
+            dict,
+        ):
+
             continue
 
-        if item.get("type") != "function":
+        if item.get(
+            "type"
+        ) != "function":
+
             continue
 
-        if item.get("name") == function_name:
+        if item.get(
+            "name"
+        ) == function_name:
+
             return item
 
     return None
@@ -97,6 +113,7 @@ def call_zero_argument_function(
     )
 
     if function_abi is None:
+
         return None
 
     inputs = function_abi.get(
@@ -105,6 +122,7 @@ def call_zero_argument_function(
     )
 
     if len(inputs) != 0:
+
         return None
 
     outputs = function_abi.get(
@@ -113,6 +131,7 @@ def call_zero_argument_function(
     )
 
     if not outputs:
+
         return None
 
     try:
@@ -151,6 +170,7 @@ def get_output_type(
     )
 
     if function_abi is None:
+
         return None
 
     outputs = function_abi.get(
@@ -159,6 +179,7 @@ def get_output_type(
     )
 
     if not outputs:
+
         return None
 
     return outputs[0].get(
@@ -176,11 +197,14 @@ def normalize_tax_value(
 ):
 
     if value is None:
+
         return None
 
     try:
 
-        value = int(value)
+        value = int(
+            value
+        )
 
     except (
         TypeError,
@@ -189,17 +213,26 @@ def normalize_tax_value(
 
         return None
 
+    # uint16 is the convention currently used by
+    # RobinShield for basis-point tax values.
     if output_type == "uint16":
 
-        percentage = value / 100
+        percentage = (
+            value
+            / 100
+        )
 
-        convention = "basis_points"
+        convention = (
+            "basis_points"
+        )
 
     else:
 
         percentage = None
 
-        convention = "unknown"
+        convention = (
+            "unknown"
+        )
 
     return {
         "raw": value,
@@ -210,6 +243,36 @@ def normalize_tax_value(
 
 
 # =========================================================
+# DEFAULT UNKNOWN RESULT
+# =========================================================
+
+def _unknown_result(
+    reason=None,
+):
+
+    result = {
+        "status": "UNKNOWN",
+        "risk": "UNKNOWN",
+        "confidence": "LOW",
+        "buy_tax": None,
+        "sell_tax": None,
+        "general_tax": None,
+        "setters": [],
+        "detected_getters": [],
+        "warnings": [],
+        "signals": [],
+    }
+
+    if reason:
+
+        result["warnings"].append(
+            reason
+        )
+
+    return result
+
+
+# =========================================================
 # BYTECODE TAX ANALYSIS
 # =========================================================
 
@@ -217,29 +280,7 @@ def _analyze_tax_from_bytecode(
     address,
 ):
 
-    result = {
-
-        "status": "UNKNOWN",
-
-        "risk": "UNKNOWN",
-
-        "confidence": "LOW",
-
-        "buy_tax": None,
-
-        "sell_tax": None,
-
-        "general_tax": None,
-
-        "setters": [],
-
-        "detected_getters": [],
-
-        "warnings": [],
-
-        "signals": [],
-
-    }
+    result = _unknown_result()
 
     try:
 
@@ -250,7 +291,8 @@ def _analyze_tax_from_bytecode(
     except Exception as e:
 
         result["status"] = "UNKNOWN"
-        result["risk"] = "HIGH"
+        result["risk"] = "UNKNOWN"
+        result["confidence"] = "LOW"
 
         result["warnings"].append(
             "Bytecode tax analysis failed: "
@@ -265,10 +307,31 @@ def _analyze_tax_from_bytecode(
     ):
 
         result["status"] = "UNKNOWN"
-        result["risk"] = "HIGH"
+        result["risk"] = "UNKNOWN"
+        result["confidence"] = "LOW"
 
         result["warnings"].append(
             "Bytecode analyzer returned an invalid result."
+        )
+
+        return result
+
+    # -----------------------------------------------------
+    # Bytecode unavailable.
+    # -----------------------------------------------------
+
+    if not bytecode.get(
+        "available",
+        False,
+    ):
+
+        result["status"] = "UNAVAILABLE"
+        result["risk"] = "UNKNOWN"
+        result["confidence"] = "LOW"
+
+        result["warnings"].append(
+            "Tax analysis is unavailable because "
+            "contract bytecode could not be loaded."
         )
 
         return result
@@ -305,6 +368,7 @@ def _analyze_tax_from_bytecode(
             item,
             dict,
         ):
+
             continue
 
         name = item.get(
@@ -316,6 +380,7 @@ def _analyze_tax_from_bytecode(
         )
 
         if name:
+
             names.append(
                 str(name)
             )
@@ -375,29 +440,7 @@ def analyze_tax(
     abi=None,
 ):
 
-    result = {
-
-        "status": "UNKNOWN",
-
-        "risk": "UNKNOWN",
-
-        "confidence": "LOW",
-
-        "buy_tax": None,
-
-        "sell_tax": None,
-
-        "general_tax": None,
-
-        "setters": [],
-
-        "detected_getters": [],
-
-        "warnings": [],
-
-        "signals": [],
-
-    }
+    result = _unknown_result()
 
     # =====================================================
     # ABI UNAVAILABLE
@@ -572,7 +615,8 @@ def analyze_tax(
 
     if (
         not result["detected_getters"]
-        and not setters
+        and
+        not setters
     ):
 
         result["status"] = "PASS"
@@ -702,7 +746,10 @@ def analyze_tax(
 
         if (
             tax is not None
-            and tax.get("percentage") is not None
+            and
+            tax.get(
+                "percentage"
+            ) is not None
         ):
 
             percentages.append(
@@ -771,7 +818,8 @@ def analyze_tax(
 
     if (
         not result["warnings"]
-        and not result["signals"]
+        and
+        not result["signals"]
     ):
 
         result["signals"].append(
