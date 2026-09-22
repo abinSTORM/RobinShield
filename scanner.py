@@ -774,6 +774,39 @@ def analyze_holders(
                 f"{holder_count}"
             )
 
+        contract_count = holder_risk.get(
+            "contract_count"
+        )
+
+        eoa_count = holder_risk.get(
+            "eoa_count"
+        )
+
+        unknown_count = holder_risk.get(
+            "unknown_count"
+        )
+
+        if contract_count is not None:
+
+            print(
+                f"Contract holders: "
+                f"{contract_count}"
+            )
+
+        if eoa_count is not None:
+
+            print(
+                f"EOA holders: "
+                f"{eoa_count}"
+            )
+
+        if unknown_count is not None:
+
+            print(
+                f"Unknown type holders: "
+                f"{unknown_count}"
+            )
+
         # -------------------------------------------------
         # HOLDER CONCENTRATION
         # -------------------------------------------------

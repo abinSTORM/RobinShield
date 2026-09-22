@@ -2693,6 +2693,10 @@ def get_holder_risk(
         total_supply
     )
 
+    # =====================================================
+    # INVALID SUPPLY
+    # =====================================================
+
     if total_supply <= 0:
 
         return {
@@ -2703,10 +2707,17 @@ def get_holder_risk(
             "top10": None,
             "coverage": "UNKNOWN",
             "verified": False,
+            "holder_count": 0,
+            "contract_count": 0,
+            "eoa_count": 0,
             "reasons": [
                 "Token total supply could not be determined."
             ],
         }
+
+    # =====================================================
+    # INVALID HOLDER DATA
+    # =====================================================
 
     if not isinstance(
         holders,
@@ -2721,10 +2732,52 @@ def get_holder_risk(
             "top10": None,
             "coverage": "UNKNOWN",
             "verified": False,
+            "holder_count": 0,
+            "contract_count": 0,
+            "eoa_count": 0,
             "reasons": [
                 "Holder data could not be determined."
             ],
         }
+
+    # =====================================================
+    # COVERAGE
+    # =====================================================
+
+    verified = bool(
+        holders.get(
+            "_verified",
+            holders.get(
+                "verified",
+                False,
+            ),
+        )
+    )
+
+    complete = bool(
+        holders.get(
+            "_complete",
+            False,
+        )
+    )
+
+    if complete and verified:
+
+        coverage = "COMPLETE"
+
+    elif holders.get(
+        "_holder_count"
+    ) is not None:
+
+        coverage = "PARTIAL"
+
+    else:
+
+        coverage = "UNKNOWN"
+
+    # =====================================================
+    # VALID HOLDERS
+    # =====================================================
 
     valid = get_valid_holders(
         holders,
@@ -2739,32 +2792,72 @@ def get_holder_risk(
             "largest_wallet": None,
             "top5": None,
             "top10": None,
-            "coverage": "UNKNOWN",
-            "verified": False,
+            "coverage": coverage,
+            "verified": verified,
+            "holder_count": 0,
+            "contract_count": 0,
+            "eoa_count": 0,
             "reasons": [
                 "No valid non-LP, non-burn holders were found."
             ],
         }
 
-    verified = bool(
-        holders.get(
-            "_verified",
-            False,
-        )
-    )
+    # =====================================================
+    # HOLDER CLASSIFICATION
+    # =====================================================
 
-    complete = bool(
-        holders.get(
-            "_complete",
-            False,
-        )
-    )
+    contract_count = 0
+    eoa_count = 0
+    unknown_count = 0
 
-    coverage = (
-        "COMPLETE"
-        if complete
-        else "PARTIAL"
-    )
+    try:
+
+        w3 = _get_web3()
+
+    except Exception:
+
+        w3 = None
+
+    for holder in valid:
+
+        address = _get_holder_address(
+            holder
+        )
+
+        if not address:
+
+            continue
+
+        if w3 is None:
+
+            continue
+
+        try:
+
+            code = w3.eth.get_code(
+                Web3.to_checksum_address(
+                    address
+                )
+            )
+
+            if code and code not in (
+                b"",
+                b"\x00",
+            ):
+
+                contract_count += 1
+
+            else:
+
+                eoa_count += 1
+
+        except Exception:
+
+            unknown_count += 1
+
+    # =====================================================
+    # CONCENTRATION
+    # =====================================================
 
     largest = valid[0]
 
@@ -2788,6 +2881,10 @@ def get_holder_risk(
         total_supply,
         excluded_addresses=excluded_addresses,
     )
+
+    # =====================================================
+    # CONCENTRATION SCORE
+    # =====================================================
 
     score = 0
 
@@ -2886,11 +2983,28 @@ def get_holder_risk(
             f"{top10:.2f}% of supply."
         )
 
-    # -----------------------------------------------------
-    # Risk classification
-    # -----------------------------------------------------
+    # =====================================================
+    # FINAL HOLDER RISK
+    # =====================================================
 
-    if score >= 7:
+    if not complete:
+
+        level = "UNKNOWN"
+
+        if (
+            "Holder coverage is partial; concentration "
+            "figures represent discovered holders and "
+            "may not represent the complete distribution."
+            not in reasons
+        ):
+
+            reasons.append(
+                "Holder coverage is partial; concentration "
+                "figures represent discovered holders and "
+                "may not represent the complete distribution."
+            )
+
+    elif score >= 7:
 
         level = "HIGH"
 
@@ -2902,19 +3016,42 @@ def get_holder_risk(
 
         level = "LOW"
 
-    if not complete:
+    # =====================================================
+    # HOLDER COUNTS
+    # =====================================================
 
-        reasons.append(
-            "Holder coverage is partial; concentration "
-            "figures represent discovered holders and "
-            "may not represent the complete distribution."
-        )
+    discovered_holder_count = len(
+        valid
+    )
 
-    if not reasons:
+    reported_holder_count = holders.get(
+        "_holder_count"
+    )
 
-        reasons.append(
-            "Holder distribution appears relatively healthy."
-        )
+    if reported_holder_count is not None:
+
+        try:
+
+            reported_holder_count = int(
+                reported_holder_count
+            )
+
+        except (
+            TypeError,
+            ValueError,
+        ):
+
+            reported_holder_count = None
+
+    holder_count = (
+        reported_holder_count
+        if reported_holder_count is not None
+        else discovered_holder_count
+    )
+
+    # =====================================================
+    # RESULT
+    # =====================================================
 
     return {
         "score": score,
@@ -2924,6 +3061,10 @@ def get_holder_risk(
         "top10": top10,
         "coverage": coverage,
         "verified": verified,
+        "holder_count": holder_count,
+        "contract_count": contract_count,
+        "eoa_count": eoa_count,
+        "unknown_count": unknown_count,
         "reasons": reasons,
     }
 
