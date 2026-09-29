@@ -733,11 +733,21 @@ def analyze_proxy(
         "implementation": None,
         "confidence": "LOW",
         "reason": None,
+
+        # -------------------------------------------------
+        # Upgradeability metadata
+        # -------------------------------------------------
+
+        "upgradeable": False,
+        "upgradeability_type": None,
+        "admin": None,
+        "beacon": None,
+        "upgrade_functions": [],
     }
 
-    # -----------------------------------------------------
+    # =====================================================
     # EIP-1967
-    # -----------------------------------------------------
+    # =====================================================
 
     try:
 
@@ -745,17 +755,139 @@ def analyze_proxy(
             address
         )
 
-        if eip1967["detected"]:
+        if (
+            isinstance(
+                eip1967,
+                dict,
+            )
+            and eip1967.get(
+                "detected",
+                False,
+            )
+        ):
 
-            return eip1967
+            result.update(
+                eip1967
+            )
+
+            result[
+                "detected"
+            ] = True
+
+            result[
+                "upgradeable"
+            ] = True
+
+            result[
+                "upgradeability_type"
+            ] = "EIP-1967"
+
+            # Preserve admin information when the detector
+            # already provides it.
+
+            result[
+                "admin"
+            ] = eip1967.get(
+                "admin"
+            )
+
+            result[
+                "beacon"
+            ] = eip1967.get(
+                "beacon"
+            )
+
+            result[
+                "upgrade_functions"
+            ] = eip1967.get(
+                "upgrade_functions",
+                [],
+            )
+
+            # -------------------------------------------------
+            # Determine likely proxy flavor from available
+            # metadata without inventing unsupported claims.
+            # -------------------------------------------------
+
+            proxy_type = str(
+                eip1967.get(
+                    "type",
+                    "EIP-1967",
+                )
+            ).upper()
+
+            if (
+                "UUPS"
+                in proxy_type
+            ):
+
+                result[
+                    "upgradeability_type"
+                ] = "UUPS"
+
+            elif (
+                "TRANSPARENT"
+                in proxy_type
+            ):
+
+                result[
+                    "upgradeability_type"
+                ] = "TRANSPARENT"
+
+            elif (
+                "BEACON"
+                in proxy_type
+            ):
+
+                result[
+                    "upgradeability_type"
+                ] = "BEACON"
+
+            else:
+
+                result[
+                    "upgradeability_type"
+                ] = "EIP-1967"
+
+            # -------------------------------------------------
+            # Add safe defaults for missing fields.
+            # -------------------------------------------------
+
+            if not result.get(
+                "type"
+            ):
+
+                result[
+                    "type"
+                ] = "EIP-1967"
+
+            if not result.get(
+                "confidence"
+            ):
+
+                result[
+                    "confidence"
+                ] = "MEDIUM"
+
+            if not result.get(
+                "reason"
+            ):
+
+                result[
+                    "reason"
+                ] = (
+                    "EIP-1967 proxy detected."
+                )
+
+            return result
 
     except Exception:
 
         pass
 
-    # -----------------------------------------------------
-    # ERC-1167
-    # -----------------------------------------------------
+    # =====================================================
+    # ERC-1167 MINIMAL PROXY
+    # =====================================================
 
     try:
 
@@ -763,32 +895,66 @@ def analyze_proxy(
             bytecode
         )
 
-        if minimal["detected"]:
+        if (
+            isinstance(
+                minimal,
+                dict,
+            )
+            and minimal.get(
+                "detected",
+                False,
+            )
+        ):
 
             return {
                 "detected": True,
+
                 "type": "ERC-1167",
-                "implementation": minimal[
+
+                "implementation": minimal.get(
                     "implementation"
-                ],
-                "confidence": minimal[
-                    "confidence"
-                ],
-                "reason": minimal[
-                    "reason"
-                ],
+                ),
+
+                "confidence": minimal.get(
+                    "confidence",
+                    "MEDIUM",
+                ),
+
+                "reason": minimal.get(
+                    "reason",
+                    "ERC-1167 minimal proxy detected.",
+                ),
+
+                # ERC-1167 itself is fixed-code delegation;
+                # do not label it as upgradeable unless another
+                # mechanism proves that.
+
+                "upgradeable": False,
+
+                "upgradeability_type": (
+                    "ERC-1167"
+                ),
+
+                "admin": None,
+
+                "beacon": None,
+
+                "upgrade_functions": [],
             }
 
     except Exception:
 
         pass
 
+    # =====================================================
+    # NO PROXY
+    # =====================================================
+
     result["reason"] = (
         "No supported proxy pattern was detected."
     )
 
     return result
-
 
 # =========================================================
 # IMPLEMENTATION ANALYSIS
