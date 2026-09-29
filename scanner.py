@@ -2930,6 +2930,49 @@ def scan_token(
         f"{overall.get('risk', 'HIGH')}"
     )
 
+    breakdown = overall.get(
+        "breakdown",
+        {},
+    )
+
+    if isinstance(
+        breakdown,
+        dict,
+    ) and breakdown:
+
+        print()
+        print(
+            "🧮 Risk evidence breakdown:"
+        )
+
+        for name, value in breakdown.items():
+
+            if name == "Evidence-based floors":
+
+                continue
+
+            try:
+
+                value = int(
+                    value
+                )
+
+            except (
+                TypeError,
+                ValueError,
+            ):
+
+                continue
+
+            print(
+                f"- {name}: +{value}"
+            )
+
+        print(
+            f"- TOTAL: "
+            f"+{overall.get('score', 0)}"
+        )
+
     warnings = overall.get(
         "warnings",
         []

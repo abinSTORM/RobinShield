@@ -1599,61 +1599,133 @@ def calculate_overall_risk(
 
     penalty = 0
 
-    penalty += _security_penalty(
+    penalty_breakdown = {}
+
+    # -----------------------------------------------------
+    # Individual engine penalties
+    # -----------------------------------------------------
+
+    security_penalty = _security_penalty(
         security,
         warnings,
     )
 
-    penalty += _liquidity_penalty(
+    penalty_breakdown[
+        "Security"
+    ] = security_penalty
+
+    penalty += security_penalty
+
+    liquidity_penalty = _liquidity_penalty(
         liquidity,
         warnings,
     )
 
-    penalty += _holder_penalty(
+    penalty_breakdown[
+        "Liquidity"
+    ] = liquidity_penalty
+
+    penalty += liquidity_penalty
+
+    holder_penalty = _holder_penalty(
         holders,
         warnings,
     )
 
-    penalty += _lp_penalty(
+    penalty_breakdown[
+        "Holder concentration"
+    ] = holder_penalty
+
+    penalty += holder_penalty
+
+    lp_penalty = _lp_penalty(
         lp_safety,
         warnings,
     )
 
-    penalty += _tax_penalty(
+    penalty_breakdown[
+        "LP safety"
+    ] = lp_penalty
+
+    penalty += lp_penalty
+
+    tax_penalty = _tax_penalty(
         tax_analysis,
         warnings,
     )
 
-    penalty += _ownership_penalty(
+    penalty_breakdown[
+        "Tax"
+    ] = tax_penalty
+
+    penalty += tax_penalty
+
+    ownership_penalty = _ownership_penalty(
         ownership,
         warnings,
     )
 
-    penalty += _trade_safety_penalty(
+    penalty_breakdown[
+        "Ownership"
+    ] = ownership_penalty
+
+    penalty += ownership_penalty
+
+    trade_safety_penalty = _trade_safety_penalty(
         trade_safety,
         warnings,
     )
 
-    penalty += _simulation_penalty(
+    penalty_breakdown[
+        "Trade safety"
+    ] = trade_safety_penalty
+
+    penalty += trade_safety_penalty
+
+    simulation_penalty = _simulation_penalty(
         trade_simulation,
         warnings,
     )
 
-    penalty += _honeypot_penalty(
+    penalty_breakdown[
+        "Trade simulation"
+    ] = simulation_penalty
+
+    penalty += simulation_penalty
+
+    honeypot_penalty = _honeypot_penalty(
         honeypot,
         warnings,
     )
 
-    penalty += _swap_execution_penalty(
+    penalty_breakdown[
+        "Honeypot / sellability"
+    ] = honeypot_penalty
+
+    penalty += honeypot_penalty
+
+    swap_penalty = _swap_execution_penalty(
         swap_simulation,
         warnings,
     )
 
-    penalty += _proxy_penalty(
+    penalty_breakdown[
+        "Deep swap execution"
+    ] = swap_penalty
+
+    penalty += swap_penalty
+
+    proxy_penalty = _proxy_penalty(
         proxy,
         implementation,
         warnings,
     )
+
+    penalty_breakdown[
+        "Proxy"
+    ] = proxy_penalty
+
+    penalty += proxy_penalty
 
     # =====================================================
     # EVIDENCE-BASED RISK FLOORS
@@ -1666,6 +1738,10 @@ def calculate_overall_risk(
     # -----------------------------------------------------
     # No supported liquidity
     # -----------------------------------------------------
+
+    penalty_breakdown[
+        "Evidence-based floors"
+    ] = 0
 
     liquidity_found = None
 
@@ -1696,6 +1772,14 @@ def calculate_overall_risk(
     ):
 
         penalty += 25
+
+        penalty_breakdown[
+            "Evidence: No liquidity"
+        ] = 25
+
+        penalty_breakdown[
+            "Evidence-based floors"
+        ] += 25
 
         warning = (
             "No supported liquidity pool was detected."
@@ -1785,6 +1869,14 @@ def calculate_overall_risk(
 
             penalty += 20
 
+            penalty_breakdown[
+                "Evidence: Extreme concentration"
+            ] = 20
+
+            penalty_breakdown[
+                "Evidence-based floors"
+            ] += 20
+
             warning = (
                 "Extreme discovered holder concentration "
                 "was detected despite partial coverage."
@@ -1803,6 +1895,14 @@ def calculate_overall_risk(
         ):
 
             penalty += 30
+
+            penalty_breakdown[
+                "Evidence: Extreme concentration"
+            ] = 30
+
+            penalty_breakdown[
+                "Evidence-based floors"
+            ] += 30
 
             warning = (
                 "A single holder controls an extremely "
@@ -1825,6 +1925,14 @@ def calculate_overall_risk(
         ):
 
             penalty += 10
+
+            penalty_breakdown[
+                "Evidence: Top 10 concentration"
+            ] = 10
+
+            penalty_breakdown[
+                "Evidence-based floors"
+            ] += 10
 
             warning = (
                 "The top 10 discovered holders control "
@@ -1902,6 +2010,7 @@ def calculate_overall_risk(
     return {
         "score": score,
         "risk": risk,
+        "breakdown": penalty_breakdown,
         "warnings": warnings,
         "positive_signals": positives,
     }
