@@ -7,6 +7,7 @@ from detectors.tax_detector import scan as tax_scan
 from detectors.ownership_detector import scan as ownership_scan
 from detectors.blacklist_detector import scan as blacklist_scan
 from detectors.pause_detector import scan as pause_scan
+from detectors.role_detector import scan as role_scan
 
 from engines.trading_controls import (
     analyze_trading_controls
@@ -90,6 +91,10 @@ def _analyze_abi(functions):
         (
             "Pause Functions",
             pause_scan,
+        ),
+        (
+            "Privileged Roles",
+            role_scan,
         ),
         (
             "Trading Controls",
