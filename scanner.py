@@ -932,11 +932,11 @@ def analyze_contract_security(
         "🧠"
     )
 
-    contract_security = None
+    contract_result = None
 
     try:
 
-        contract_security = security_scan(
+        contract_result = security_scan(
             token_address
         )
 
@@ -946,13 +946,54 @@ def analyze_contract_security(
             f"Security analysis failed: {e}"
         )
 
-    if not contract_security:
+        return None
+
+    if not contract_result:
 
         print(
             "Contract security analysis unavailable."
         )
 
-        return contract_security
+        return contract_result
+
+    # =====================================================
+    # NORMALIZE SECURITY REPORT
+    # =====================================================
+
+    if isinstance(
+        contract_result,
+        dict,
+    ):
+
+        contract_security = contract_result.get(
+            "security",
+            [],
+        )
+
+        bytecode_result = contract_result.get(
+            "bytecode",
+            {},
+        )
+
+    else:
+
+        # Backward compatibility if the engine ever
+        # returns the old list format.
+
+        contract_security = contract_result
+
+        bytecode_result = {}
+
+    if not isinstance(
+        contract_security,
+        list,
+    ):
+
+        contract_security = []
+
+    # =====================================================
+    # PRINT SECURITY DETECTORS
+    # =====================================================
 
     for item in contract_security:
 
@@ -1015,6 +1056,52 @@ def analyze_contract_security(
         print(
             f"Reason : {reason}"
         )
+
+        # -------------------------------------------------
+        # BYTECODE BEHAVIOR DETAILS
+        # -------------------------------------------------
+
+        if check == "Bytecode Behavior":
+
+            details = item.get(
+                "details",
+                {},
+            )
+
+            if isinstance(
+                details,
+                dict,
+            ):
+
+                print(
+                    "Delegatecall : "
+                    f"{details.get('delegatecall', 0)}"
+                )
+
+                print(
+                    "Selfdestruct : "
+                    f"{details.get('selfdestruct', 0)}"
+                )
+
+                print(
+                    "TX.origin : "
+                    f"{details.get('tx_origin', 0)}"
+                )
+
+                print(
+                    "External calls : "
+                    f"{details.get('external_calls', 0)}"
+                )
+
+                print(
+                    "Contract creation : "
+                    f"{details.get('contract_creation', 0)}"
+                )
+
+                print(
+                    "Storage writes : "
+                    f"{details.get('storage_writes', 0)}"
+                )
 
     return contract_security
 
@@ -1164,6 +1251,62 @@ def analyze_proxy(
                     f"Tax selectors: "
                     f"{len(groups.get('tax', []))}"
                 )
+
+                # =========================================
+                # IMPLEMENTATION EVM BEHAVIOR
+                # =========================================
+
+                behavior = (
+                    implementation_analysis.get(
+                        "behavior",
+                        {}
+                    )
+                )
+
+                if isinstance(
+                    behavior,
+                    dict,
+                ):
+
+                    print()
+                    print(
+                        "EVM Behavior"
+                    )
+
+                    print(
+                        f"Delegatecall: "
+                        f"{behavior.get('delegatecall_count', 0)}"
+                    )
+
+                    print(
+                        f"Selfdestruct: "
+                        f"{behavior.get('selfdestruct_count', 0)}"
+                    )
+
+                    print(
+                        f"TX.origin: "
+                        f"{behavior.get('tx_origin_count', 0)}"
+                    )
+
+                    print(
+                        f"External calls: "
+                        f"{behavior.get('external_calls', 0)}"
+                    )
+
+                    print(
+                        f"Contract creation: "
+                        f"{behavior.get('contract_creation', 0)}"
+                    )
+
+                    print(
+                        f"Storage writes: "
+                        f"{behavior.get('storage_writes', 0)}"
+                    )
+
+                    print(
+                        f"Behavior confidence: "
+                        f"{behavior.get('confidence', 'LOW')}"
+                    )
 
                 print_signals(
                     implementation_analysis

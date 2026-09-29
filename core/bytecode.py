@@ -847,16 +847,225 @@ def analyze_implementation(
         detected
     )
 
+    # =====================================================
+    # EVM BEHAVIOR
+    # =====================================================
+
+    behavior = {
+
+        "delegatecall": False,
+        "delegatecall_count": 0,
+
+        "selfdestruct": False,
+        "selfdestruct_count": 0,
+
+        "tx_origin": False,
+        "tx_origin_count": 0,
+
+        "external_calls": 0,
+
+        "contract_creation": 0,
+
+        "storage_writes": 0,
+
+        "confidence": "LOW",
+
+    }
+
+    try:
+
+        if isinstance(
+            implementation_bytecode,
+            bytes,
+        ):
+
+            code_bytes = (
+                implementation_bytecode
+            )
+
+        else:
+
+            code_hex = str(
+                implementation_bytecode
+            )
+
+            if code_hex.startswith(
+                "0x"
+            ):
+
+                code_hex = code_hex[2:]
+
+            code_bytes = bytes.fromhex(
+                code_hex
+            )
+
+        pc = 0
+
+        while pc < len(
+            code_bytes
+        ):
+
+            opcode = code_bytes[
+                pc
+            ]
+
+            # -------------------------------------------------
+            # PUSH1 .. PUSH32
+            # -------------------------------------------------
+
+            if (
+                opcode >= 0x60
+                and opcode <= 0x7F
+            ):
+
+                push_size = (
+                    opcode
+                    - 0x5F
+                )
+
+                pc += (
+                    1
+                    + push_size
+                )
+
+                continue
+
+            # -------------------------------------------------
+            # DELEGATECALL
+            # -------------------------------------------------
+
+            if opcode == 0xF4:
+
+                behavior[
+                    "delegatecall_count"
+                ] += 1
+
+            # -------------------------------------------------
+            # SELFDESTRUCT
+            # -------------------------------------------------
+
+            elif opcode == 0xFF:
+
+                behavior[
+                    "selfdestruct_count"
+                ] += 1
+
+            # -------------------------------------------------
+            # TX.ORIGIN
+            # -------------------------------------------------
+
+            elif opcode == 0x32:
+
+                behavior[
+                    "tx_origin_count"
+                ] += 1
+
+            # -------------------------------------------------
+            # External calls
+            #
+            # CALL
+            # CALLCODE
+            # STATICCALL
+            # -------------------------------------------------
+
+            elif opcode in (
+                0xF1,
+                0xF2,
+                0xFA,
+            ):
+
+                behavior[
+                    "external_calls"
+                ] += 1
+
+            # -------------------------------------------------
+            # Contract creation
+            #
+            # CREATE
+            # CREATE2
+            # -------------------------------------------------
+
+            elif opcode in (
+                0xF0,
+                0xF5,
+            ):
+
+                behavior[
+                    "contract_creation"
+                ] += 1
+
+            # -------------------------------------------------
+            # STORAGE WRITE
+            # -------------------------------------------------
+
+            elif opcode == 0x55:
+
+                behavior[
+                    "storage_writes"
+                ] += 1
+
+            pc += 1
+
+        behavior[
+            "delegatecall"
+        ] = (
+            behavior[
+                "delegatecall_count"
+            ] > 0
+        )
+
+        behavior[
+            "selfdestruct"
+        ] = (
+            behavior[
+                "selfdestruct_count"
+            ] > 0
+        )
+
+        behavior[
+            "tx_origin"
+        ] = (
+            behavior[
+                "tx_origin_count"
+            ] > 0
+        )
+
+        behavior[
+            "confidence"
+        ] = "MEDIUM"
+
+    except Exception:
+
+        behavior[
+            "confidence"
+        ] = "LOW"
+
+    # =====================================================
+    # RESULT
+    # =====================================================
+
     result = {
+
         "available": True,
+
         "status": "PASS",
+
         "confidence": "MEDIUM",
+
         "address": implementation_address,
+
         "bytecode_size": size,
+
         "detected_selectors": detected,
+
         "groups": groups,
+
+        "behavior": behavior,
+
         "warnings": [],
+
         "signals": [],
+
     }
 
     result["signals"].append(
@@ -868,6 +1077,70 @@ def analyze_implementation(
         f"Implementation bytecode size: "
         f"{size} bytes."
     )
+
+    # =====================================================
+    # BEHAVIOR SIGNALS
+    # =====================================================
+
+    if behavior[
+        "delegatecall_count"
+    ] > 0:
+
+        result["signals"].append(
+            "Implementation contains "
+            "DELEGATECALL opcode."
+        )
+
+    if behavior[
+        "selfdestruct_count"
+    ] > 0:
+
+        result["warnings"].append(
+            "Implementation contains "
+            "SELFDESTRUCT opcode."
+        )
+
+    if behavior[
+        "tx_origin_count"
+    ] > 0:
+
+        result["warnings"].append(
+            "Implementation reads TX.origin."
+        )
+
+    if behavior[
+        "external_calls"
+    ] > 0:
+
+        result["signals"].append(
+            "Implementation contains "
+            f"{behavior['external_calls']} "
+            "external call opcodes."
+        )
+
+    if behavior[
+        "contract_creation"
+    ] > 0:
+
+        result["signals"].append(
+            "Implementation contains "
+            f"{behavior['contract_creation']} "
+            "contract-creation opcodes."
+        )
+
+    if behavior[
+        "storage_writes"
+    ] > 0:
+
+        result["signals"].append(
+            "Implementation contains "
+            f"{behavior['storage_writes']} "
+            "storage-write opcodes."
+        )
+
+    # =====================================================
+    # OWNERSHIP
+    # =====================================================
 
     if groups["ownership"]:
 
@@ -882,6 +1155,10 @@ def analyze_implementation(
             )
         )
 
+    # =====================================================
+    # BLACKLIST
+    # =====================================================
+
     if groups["blacklist"]:
 
         result["warnings"].append(
@@ -889,12 +1166,20 @@ def analyze_implementation(
             "blacklist-related selectors."
         )
 
+    # =====================================================
+    # PAUSE
+    # =====================================================
+
     if groups["pause"]:
 
         result["warnings"].append(
             "Implementation contains "
             "pause-related selectors."
         )
+
+    # =====================================================
+    # TRADING
+    # =====================================================
 
     if groups["trading"]:
 
@@ -909,12 +1194,20 @@ def analyze_implementation(
             )
         )
 
+    # =====================================================
+    # LIMITS
+    # =====================================================
+
     if groups["limits"]:
 
         result["signals"].append(
             "Implementation contains "
             "transaction-limit selectors."
         )
+
+    # =====================================================
+    # TAX
+    # =====================================================
 
     if groups["tax"]:
 
@@ -976,6 +1269,29 @@ def analyze_bytecode(
 
             "tax": [],
 
+        },
+
+        "behavior": {
+
+            "delegatecall": False,
+
+            "delegatecall_count": 0,
+
+            "selfdestruct": False,
+
+            "selfdestruct_count": 0,
+
+            "tx_origin": False,
+
+            "tx_origin_count": 0,
+
+            "external_calls": 0,
+
+            "contract_creation": 0,
+
+            "storage_writes": 0,
+
+            "confidence": "LOW",
         },
 
         "warnings": [],
@@ -1115,6 +1431,258 @@ def analyze_bytecode(
             "small. It may be a proxy, "
             "minimal contract, forwarder, "
             "or another special contract type."
+        )
+
+    # =====================================================
+    # EVM BEHAVIOR ANALYSIS
+    # =====================================================
+    #
+    # We scan real EVM opcodes while correctly skipping
+    # PUSH1-PUSH32 data bytes. This prevents bytes inside
+    # constants from being mistaken for opcodes.
+    #
+    # These signals are behavioral indicators only.
+    # They do not prove malicious intent by themselves.
+    # =====================================================
+
+    behavior = result[
+        "behavior"
+    ]
+
+    try:
+
+        code_hex = str(
+            bytecode
+        )
+
+        if code_hex.startswith(
+            "0x"
+        ):
+
+            code_hex = code_hex[2:]
+
+        code_bytes = bytes.fromhex(
+            code_hex
+        )
+
+        pc = 0
+
+        while pc < len(
+            code_bytes
+        ):
+
+            opcode = code_bytes[
+                pc
+            ]
+
+            # -------------------------------------------------
+            # PUSH1 .. PUSH32
+            # -------------------------------------------------
+
+            if (
+                opcode >= 0x60
+                and opcode <= 0x7F
+            ):
+
+                push_size = (
+                    opcode
+                    - 0x5F
+                )
+
+                pc += (
+                    1
+                    + push_size
+                )
+
+                continue
+
+            # -------------------------------------------------
+            # DELEGATECALL
+            # -------------------------------------------------
+
+            if opcode == 0xF4:
+
+                behavior[
+                    "delegatecall_count"
+                ] += 1
+
+            # -------------------------------------------------
+            # SELFDESTRUCT
+            # -------------------------------------------------
+
+            elif opcode == 0xFF:
+
+                behavior[
+                    "selfdestruct_count"
+                ] += 1
+
+            # -------------------------------------------------
+            # ORIGIN
+            # -------------------------------------------------
+
+            elif opcode == 0x32:
+
+                behavior[
+                    "tx_origin_count"
+                ] += 1
+
+            # -------------------------------------------------
+            # CALL / CALLCODE / STATICCALL
+            # -------------------------------------------------
+
+            elif opcode in (
+                0xF1,
+                0xF2,
+                0xFA,
+            ):
+
+                behavior[
+                    "external_calls"
+                ] += 1
+
+            # -------------------------------------------------
+            # CREATE / CREATE2
+            # -------------------------------------------------
+
+            elif opcode in (
+                0xF0,
+                0xF5,
+            ):
+
+                behavior[
+                    "contract_creation"
+                ] += 1
+
+            # -------------------------------------------------
+            # SSTORE
+            # -------------------------------------------------
+
+            elif opcode == 0x55:
+
+                behavior[
+                    "storage_writes"
+                ] += 1
+
+            pc += 1
+
+        behavior[
+            "delegatecall"
+        ] = (
+            behavior[
+                "delegatecall_count"
+            ] > 0
+        )
+
+        behavior[
+            "selfdestruct"
+        ] = (
+            behavior[
+                "selfdestruct_count"
+            ] > 0
+        )
+
+        behavior[
+            "tx_origin"
+        ] = (
+            behavior[
+                "tx_origin_count"
+            ] > 0
+        )
+
+        behavior[
+            "confidence"
+        ] = "MEDIUM"
+
+    except Exception as e:
+
+        behavior[
+            "confidence"
+        ] = "LOW"
+
+        result["warnings"].append(
+            "EVM behavior analysis could not "
+            f"be completed: {e}"
+        )
+
+    # =====================================================
+    # BEHAVIOR SIGNALS
+    # =====================================================
+
+    if behavior[
+        "delegatecall"
+    ]:
+
+        result["signals"].append(
+            "DELEGATECALL opcode detected in "
+            "contract bytecode."
+        )
+
+        # A proxy using delegatecall is expected.
+        # The warning is therefore contextual.
+        if not result["proxy"].get(
+            "detected"
+        ):
+
+            result["warnings"].append(
+                "Delegatecall is present outside a "
+                "recognized proxy pattern. This can "
+                "introduce upgradeable or externally "
+                "controlled execution behavior."
+            )
+
+    if behavior[
+        "selfdestruct"
+    ]:
+
+        result["signals"].append(
+            "SELFDESTRUCT opcode detected in "
+            "contract bytecode."
+        )
+
+        result["warnings"].append(
+            "SELFDESTRUCT behavior is present in "
+            "the analyzed bytecode."
+        )
+
+    if behavior[
+        "tx_origin"
+    ]:
+
+        result["signals"].append(
+            "TX.origin opcode detected."
+        )
+
+        result["warnings"].append(
+            "The contract reads transaction origin "
+            "directly; this can indicate sensitive "
+            "authorization logic and requires review."
+        )
+
+    if behavior[
+        "external_calls"
+    ]:
+
+        result["signals"].append(
+            "External call opcodes detected: "
+            f"{behavior['external_calls']}."
+        )
+
+    if behavior[
+        "contract_creation"
+    ]:
+
+        result["signals"].append(
+            "Contract creation opcodes detected: "
+            f"{behavior['contract_creation']}."
+        )
+
+    if behavior[
+        "storage_writes"
+    ]:
+
+        result["signals"].append(
+            "Storage-write opcodes detected: "
+            f"{behavior['storage_writes']}."
         )
 
     # =====================================================

@@ -581,8 +581,9 @@ def _analyze_implementation(
     """
     Analyze the proxy implementation.
 
-    ABI is preferred.
-    Bytecode is used as fallback.
+    ABI is preferred for security detectors.
+    Bytecode behavior is analyzed separately so the
+    implementation's actual EVM behavior is also inspected.
     """
 
     result = {
@@ -590,6 +591,7 @@ def _analyze_implementation(
         "source": "UNKNOWN",
         "verified": False,
         "security": [],
+        "behavior": {},
     }
 
     # =====================================================
@@ -624,8 +626,6 @@ def _analyze_implementation(
 
         except Exception as e:
 
-            result["source"] = "ABI"
-            result["verified"] = True
             result["error"] = str(e)
 
             result["security"] = [
@@ -640,7 +640,192 @@ def _analyze_implementation(
                 }
             ]
 
-        return result
+    else:
+
+        # =================================================
+        # IMPLEMENTATION BYTECODE FALLBACK
+        # =================================================
+
+        result["source"] = "BYTECODE"
+
+        result["security"] = _analyze_bytecode(
+            implementation_address
+        )
+
+    # =====================================================
+    # IMPLEMENTATION BYTECODE BEHAVIOR
+    # =====================================================
+
+    try:
+
+        bytecode_result = analyze_bytecode(
+            implementation_address
+        )
+
+        if isinstance(
+            bytecode_result,
+            dict,
+        ):
+
+            behavior = bytecode_result.get(
+                "behavior",
+                {},
+            )
+
+            if isinstance(
+                behavior,
+                dict,
+            ):
+
+                result["behavior"] = behavior
+
+                delegatecall_count = int(
+                    behavior.get(
+                        "delegatecall_count",
+                        0,
+                    )
+                    or 0
+                )
+
+                selfdestruct_count = int(
+                    behavior.get(
+                        "selfdestruct_count",
+                        0,
+                    )
+                    or 0
+                )
+
+                tx_origin_count = int(
+                    behavior.get(
+                        "tx_origin_count",
+                        0,
+                    )
+                    or 0
+                )
+
+                external_calls = int(
+                    behavior.get(
+                        "external_calls",
+                        0,
+                    )
+                    or 0
+                )
+
+                contract_creation = int(
+                    behavior.get(
+                        "contract_creation",
+                        0,
+                    )
+                    or 0
+                )
+
+                storage_writes = int(
+                    behavior.get(
+                        "storage_writes",
+                        0,
+                    )
+                    or 0
+                )
+
+                behavior_confidence = behavior.get(
+                    "confidence",
+                    "LOW",
+                )
+
+                reasons = []
+
+                if selfdestruct_count > 0:
+
+                    reasons.append(
+                        "SELFDESTRUCT detected "
+                        f"({selfdestruct_count})."
+                    )
+
+                if tx_origin_count > 0:
+
+                    reasons.append(
+                        "TX.origin detected "
+                        f"({tx_origin_count})."
+                    )
+
+                if delegatecall_count > 0:
+
+                    reasons.append(
+                        "DELEGATECALL detected "
+                        f"({delegatecall_count})."
+                    )
+
+                if reasons:
+
+                    behavior_status = "WARNING"
+
+                    behavior_reason = " ".join(
+                        reasons
+                    )
+
+                else:
+
+                    behavior_status = "PASS"
+
+                    behavior_reason = (
+                        "No high-sensitivity EVM behavior "
+                        "was detected in the implementation."
+                    )
+
+                result["security"].append(
+                    {
+                        "check": (
+                            "Implementation "
+                            "Bytecode Behavior"
+                        ),
+                        "status": behavior_status,
+                        "confidence": behavior_confidence,
+                        "reason": behavior_reason,
+                        "details": {
+                            "delegatecall": (
+                                delegatecall_count
+                            ),
+                            "selfdestruct": (
+                                selfdestruct_count
+                            ),
+                            "tx_origin": (
+                                tx_origin_count
+                            ),
+                            "external_calls": (
+                                external_calls
+                            ),
+                            "contract_creation": (
+                                contract_creation
+                            ),
+                            "storage_writes": (
+                                storage_writes
+                            ),
+                        },
+                    }
+                )
+
+    except Exception as e:
+
+        result["behavior"] = {
+            "confidence": "LOW",
+        }
+
+        result["security"].append(
+            {
+                "check": (
+                    "Implementation "
+                    "Bytecode Behavior"
+                ),
+                "status": "UNKNOWN",
+                "confidence": "LOW",
+                "reason": (
+                    "Implementation bytecode behavior "
+                    f"analysis failed: {e}"
+                ),
+            }
+        )
+
+    return result
 
     # =====================================================
     # IMPLEMENTATION BYTECODE FALLBACK
@@ -897,6 +1082,164 @@ def security_scan(
             _analyze_bytecode(
                 address
             )
+        )
+
+    # =====================================================
+    # BYTECODE BEHAVIOR
+    # =====================================================
+
+    behavior = bytecode_result.get(
+        "behavior",
+        {},
+    )
+
+    if isinstance(
+        behavior,
+        dict,
+    ):
+
+        delegatecall_count = int(
+            behavior.get(
+                "delegatecall_count",
+                0,
+            )
+            or 0
+        )
+
+        selfdestruct_count = int(
+            behavior.get(
+                "selfdestruct_count",
+                0,
+            )
+            or 0
+        )
+
+        tx_origin_count = int(
+            behavior.get(
+                "tx_origin_count",
+                0,
+            )
+            or 0
+        )
+
+        external_calls = int(
+            behavior.get(
+                "external_calls",
+                0,
+            )
+            or 0
+        )
+
+        contract_creation = int(
+            behavior.get(
+                "contract_creation",
+                0,
+            )
+            or 0
+        )
+
+        storage_writes = int(
+            behavior.get(
+                "storage_writes",
+                0,
+            )
+            or 0
+        )
+
+        behavior_confidence = behavior.get(
+            "confidence",
+            "LOW",
+        )
+
+        reasons = []
+
+        if selfdestruct_count > 0:
+
+            reasons.append(
+                "SELFDESTRUCT detected "
+                f"({selfdestruct_count})."
+            )
+
+        if tx_origin_count > 0:
+
+            reasons.append(
+                "TX.origin detected "
+                f"({tx_origin_count})."
+            )
+
+        if (
+            delegatecall_count > 0
+            and not proxy.get(
+                "detected",
+                False,
+            )
+        ):
+
+            reasons.append(
+                "DELEGATECALL detected outside a "
+                "recognized proxy pattern "
+                f"({delegatecall_count})."
+            )
+
+        if reasons:
+
+            behavior_status = "WARNING"
+
+            behavior_reason = " ".join(
+                reasons
+            )
+
+        else:
+
+            behavior_status = "PASS"
+
+            behavior_reason = (
+                "No high-sensitivity bytecode behavior "
+                "was detected outside recognized proxy "
+                "patterns."
+            )
+
+        security_report.append(
+            {
+                "check": "Bytecode Behavior",
+                "status": behavior_status,
+                "confidence": behavior_confidence,
+                "reason": behavior_reason,
+                "details": {
+                    "delegatecall": (
+                        delegatecall_count
+                    ),
+                    "selfdestruct": (
+                        selfdestruct_count
+                    ),
+                    "tx_origin": (
+                        tx_origin_count
+                    ),
+                    "external_calls": (
+                        external_calls
+                    ),
+                    "contract_creation": (
+                        contract_creation
+                    ),
+                    "storage_writes": (
+                        storage_writes
+                    ),
+                },
+            }
+        )
+
+    else:
+
+        security_report.append(
+            {
+                "check": "Bytecode Behavior",
+                "status": "UNKNOWN",
+                "confidence": "LOW",
+                "reason": (
+                    "Bytecode behavior analysis "
+                    "was unavailable."
+                ),
+            }
         )
 
     # =====================================================
