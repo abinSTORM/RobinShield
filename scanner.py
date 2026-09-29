@@ -2472,6 +2472,123 @@ def scan_token(
     )
 
     # =====================================================
+    # INITIAL MINT / DISTRIBUTION
+    # =====================================================
+
+    from analysis.initial_distribution import (
+        analyze_initial_distribution,
+    )
+
+    print_section(
+        "INITIAL MINT / DISTRIBUTION",
+        "🎯"
+    )
+
+    initial_distribution = (
+        analyze_initial_distribution(
+            token_address
+        )
+    )
+
+    print(
+        f"Status: "
+        f"{initial_distribution.get('status', 'UNKNOWN')}"
+    )
+
+    print(
+        f"Risk: "
+        f"{initial_distribution.get('risk', 'UNKNOWN')}"
+    )
+
+    print(
+        f"Confidence: "
+        f"{initial_distribution.get('confidence', 'LOW')}"
+    )
+
+    print(
+        f"Mint found: "
+        f"{initial_distribution.get('mint_found', False)}"
+    )
+
+    print(
+        f"Mint recipients: "
+        f"{initial_distribution.get('recipient_count', 0)}"
+    )
+
+    largest_percentage = (
+        initial_distribution.get(
+            "largest_percentage"
+        )
+    )
+
+    if largest_percentage is not None:
+
+        print(
+            f"Largest observed mint recipient: "
+            f"{largest_percentage:.2f}%"
+        )
+
+    top5_percentage = (
+        initial_distribution.get(
+            "top5_percentage"
+        )
+    )
+
+    if top5_percentage is not None:
+
+        print(
+            f"Top 5 observed mint recipients: "
+            f"{top5_percentage:.2f}%"
+        )
+
+    earliest_block = (
+        initial_distribution.get(
+            "earliest_block"
+        )
+    )
+
+    if earliest_block is not None:
+
+        print(
+            f"Earliest observed mint block: "
+            f"{earliest_block}"
+        )
+
+    warnings = initial_distribution.get(
+        "warnings",
+        []
+    )
+
+    if warnings:
+
+        print(
+            "\n⚠️ Warnings:"
+        )
+
+        for warning in warnings:
+
+            print(
+                f"- {warning}"
+            )
+
+    signals = initial_distribution.get(
+        "signals",
+        []
+    )
+
+    if signals:
+
+        print(
+            "\nℹ️ Signals:"
+        )
+
+        for signal in signals:
+
+            print(
+                f"- {signal}"
+            )
+
+    # =====================================================
     # TRADE SAFETY
     # =====================================================
 
