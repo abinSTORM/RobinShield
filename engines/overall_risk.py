@@ -1656,7 +1656,189 @@ def calculate_overall_risk(
     )
 
     # =====================================================
-    # SCORE
+    # EVIDENCE-BASED RISK FLOORS
+    # =====================================================
+    #
+    # These are applied only when concrete evidence exists.
+    # UNKNOWN / UNAVAILABLE by themselves do not create risk.
+    #
+
+    # -----------------------------------------------------
+    # No supported liquidity
+    # -----------------------------------------------------
+
+    liquidity_found = None
+
+    if isinstance(
+        liquidity,
+        dict,
+    ):
+
+        liquidity_found = liquidity.get(
+            "found"
+        )
+
+    if (
+        liquidity_found is False
+        or (
+            isinstance(
+                liquidity,
+                dict,
+            )
+            and str(
+                liquidity.get(
+                    "risk",
+                    "",
+                )
+            ).upper()
+            == "NONE"
+        )
+    ):
+
+        penalty += 25
+
+        warning = (
+            "No supported liquidity pool was detected."
+        )
+
+        if warning not in warnings:
+
+            warnings.append(
+                warning
+            )
+
+    # -----------------------------------------------------
+    # Holder concentration
+    # -----------------------------------------------------
+
+    if isinstance(
+        holders,
+        dict,
+    ):
+
+        coverage = str(
+            holders.get(
+                "coverage",
+                "",
+            )
+        ).upper()
+
+        largest_wallet = holders.get(
+            "largest_wallet"
+        )
+
+        top5 = holders.get(
+            "top5"
+        )
+
+        top10 = holders.get(
+            "top10"
+        )
+
+        try:
+
+            largest_wallet = float(
+                largest_wallet
+            )
+
+        except (
+            TypeError,
+            ValueError,
+        ):
+
+            largest_wallet = None
+
+        try:
+
+            top5 = float(
+                top5
+            )
+
+        except (
+            TypeError,
+            ValueError,
+        ):
+
+            top5 = None
+
+        try:
+
+            top10 = float(
+                top10
+            )
+
+        except (
+            TypeError,
+            ValueError,
+        ):
+
+            top10 = None
+
+        # Partial coverage is still a warning signal when
+        # the discovered concentration is extreme.
+
+        if (
+            coverage == "PARTIAL"
+            and largest_wallet is not None
+            and largest_wallet >= 50
+        ):
+
+            penalty += 20
+
+            warning = (
+                "Extreme discovered holder concentration "
+                "was detected despite partial coverage."
+            )
+
+            if warning not in warnings:
+
+                warnings.append(
+                    warning
+                )
+
+        elif (
+            coverage == "COMPLETE"
+            and largest_wallet is not None
+            and largest_wallet >= 50
+        ):
+
+            penalty += 30
+
+            warning = (
+                "A single holder controls an extremely "
+                "large share of token supply."
+            )
+
+            if warning not in warnings:
+
+                warnings.append(
+                    warning
+                )
+
+        # -------------------------------------------------
+        # Top 10 concentration
+        # -------------------------------------------------
+
+        if (
+            top10 is not None
+            and top10 >= 80
+        ):
+
+            penalty += 10
+
+            warning = (
+                "The top 10 discovered holders control "
+                f"{top10:.2f}% of supply."
+            )
+
+            if warning not in warnings:
+
+                warnings.append(
+                    warning
+                )
+
+    # =====================================================
+    # LIMIT PENALTY
     # =====================================================
 
     penalty = max(
@@ -1669,33 +1851,35 @@ def calculate_overall_risk(
         ),
     )
 
-    score = 100 - penalty
+    # =====================================================
+    # RISK SCORE
+    # =====================================================
+
+    score = penalty
 
     score = max(
         0,
         min(
-            int(
-                score
-            ),
             100,
-        ),
+            score
+        )
     )
 
-    # =====================================================
-    # RISK LEVEL
-    # =====================================================
+    if score >= 75:
 
-    if score >= 80:
+        risk = "CRITICAL"
 
-        risk = "LOW"
+    elif score >= 50:
 
-    elif score >= 55:
+        risk = "HIGH"
+
+    elif score >= 25:
 
         risk = "MEDIUM"
 
     else:
 
-        risk = "HIGH"
+        risk = "LOW"
 
     # =====================================================
     # POSITIVE SIGNALS

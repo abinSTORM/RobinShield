@@ -1439,6 +1439,159 @@ def analyze_ownership_section(
 # TRADING RESTRICTIONS
 # =========================================================
 
+def analyze_supply_section(
+    token_address,
+    token_abi,
+):
+
+    from engines.supply_analysis import (
+        analyze_supply,
+    )
+
+    print_section(
+        "SUPPLY / MINT ANALYSIS",
+        "📈"
+    )
+
+    supply_analysis = {
+        "status": "UNKNOWN",
+        "risk": "UNKNOWN",
+        "confidence": "LOW",
+        "mintable": None,
+        "mint_functions": [],
+        "supply_controls": [],
+        "burn_functions": [],
+        "warnings": [],
+        "signals": [],
+    }
+
+    try:
+
+        supply_analysis = analyze_supply(
+            abi=token_abi,
+        )
+
+    except Exception as e:
+
+        supply_analysis = {
+            "status": "UNKNOWN",
+            "risk": "UNKNOWN",
+            "confidence": "LOW",
+            "mintable": None,
+            "mint_functions": [],
+            "supply_controls": [],
+            "burn_functions": [],
+            "warnings": [
+                "Supply analysis failed: "
+                f"{e}"
+            ],
+            "signals": [],
+        }
+
+    print(
+        f"Status: "
+        f"{supply_analysis.get('status', 'UNKNOWN')}"
+    )
+
+    print(
+        f"Risk: "
+        f"{supply_analysis.get('risk', 'UNKNOWN')}"
+    )
+
+    print(
+        f"Confidence: "
+        f"{supply_analysis.get('confidence', 'LOW')}"
+    )
+
+    mintable = supply_analysis.get(
+        "mintable"
+    )
+
+    if mintable is not None:
+
+        print(
+            f"Mintable: "
+            f"{mintable}"
+        )
+
+    mint_functions = supply_analysis.get(
+        "mint_functions",
+        [],
+    )
+
+    if mint_functions:
+
+        print(
+            "Mint functions: "
+            + ", ".join(
+                mint_functions
+            )
+        )
+
+    supply_controls = supply_analysis.get(
+        "supply_controls",
+        [],
+    )
+
+    if supply_controls:
+
+        print(
+            "Supply controls: "
+            + ", ".join(
+                supply_controls
+            )
+        )
+
+    burn_functions = supply_analysis.get(
+        "burn_functions",
+        [],
+    )
+
+    if burn_functions:
+
+        print(
+            "Burn functions: "
+            + ", ".join(
+                burn_functions
+            )
+        )
+
+    warnings = supply_analysis.get(
+        "warnings",
+        [],
+    )
+
+    if warnings:
+
+        print(
+            "\n⚠️ Warnings:"
+        )
+
+        for warning in warnings:
+
+            print(
+                f"- {warning}"
+            )
+
+    signals = supply_analysis.get(
+        "signals",
+        [],
+    )
+
+    if signals:
+
+        print(
+            "\nℹ️ Signals:"
+        )
+
+        for signal in signals:
+
+            print(
+                f"- {signal}"
+            )
+
+    return supply_analysis
+
 def analyze_trading_restrictions_section(
     token_address,
     token_abi,
@@ -2302,6 +2455,17 @@ def scan_token(
 
     trading_restrictions = (
         analyze_trading_restrictions_section(
+            token_address,
+            token_abi,
+        )
+    )
+    
+    # =====================================================
+    # SUPPLY / MINT ANALYSIS
+    # =====================================================
+
+    supply_analysis = (
+        analyze_supply_section(
             token_address,
             token_abi,
         )
