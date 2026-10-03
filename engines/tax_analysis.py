@@ -100,6 +100,109 @@ def find_function_abi(
 
     return None
 
+def analyze_tax_setter_permissions(
+    abi,
+    setters,
+):
+    """
+    Analyze ABI-level access-control hints for tax setters.
+
+    This does not prove runtime authorization. It uses the
+    function ABI and known ownership/admin patterns to identify
+    whether setter permissions are explicitly represented.
+    """
+
+    result = {
+        "status": "UNKNOWN",
+        "confidence": "LOW",
+        "owner_restricted": False,
+        "admin_restricted": False,
+        "unrestricted": False,
+        "signals": [],
+        "warnings": [],
+    }
+
+    if not setters:
+        result["status"] = "NOT_APPLICABLE"
+        result["confidence"] = "HIGH"
+        result["signals"].append(
+            "No recognized tax-setting functions were detected."
+        )
+        return result
+
+    owner_functions = [
+        "owner",
+        "transferOwnership",
+        "renounceOwnership",
+    ]
+
+    admin_functions = [
+        "admin",
+        "getAdmin",
+        "DEFAULT_ADMIN_ROLE",
+        "hasRole",
+        "grantRole",
+        "revokeRole",
+    ]
+
+    owner_present = any(
+        find_function_abi(
+            abi,
+            name,
+        )
+        for name in owner_functions
+    )
+
+    admin_present = any(
+        find_function_abi(
+            abi,
+            name,
+        )
+        for name in admin_functions
+    )
+
+    if owner_present:
+        result["owner_restricted"] = True
+
+        result["signals"].append(
+            "Ownership functions are present; tax setter access "
+            "may be controlled by ownership."
+        )
+
+    if admin_present:
+        result["admin_restricted"] = True
+
+        result["signals"].append(
+            "Administrative access-control functions are present."
+        )
+
+    if not owner_present and not admin_present:
+        result["unrestricted"] = True
+
+        result["status"] = "WARNING"
+        result["confidence"] = "MEDIUM"
+
+        result["warnings"].append(
+            "Tax setters were detected, but no recognized "
+            "owner/admin access-control functions were found."
+        )
+
+        result["signals"].append(
+            "Tax setter authorization could not be established "
+            "from the available ABI."
+        )
+
+        return result
+
+    result["status"] = "REVIEW"
+    result["confidence"] = "MEDIUM"
+
+    result["signals"].append(
+        "Tax setter authorization requires runtime "
+        "permission analysis."
+    )
+
+    return result
 
 def call_zero_argument_function(
     address,
@@ -515,6 +618,18 @@ def analyze_tax(
     )
 
     result["setters"] = setters
+    result["setter_permissions"] = (
+        analyze_tax_setter_permissions(
+            abi,
+            setters,
+        )
+    )
+
+    result["dynamic_tax"] = bool(
+        setters
+    )
+
+    result["tax_setters"] = setters
 
     # =====================================================
     # BUY TAX
@@ -725,9 +840,14 @@ def analyze_tax(
         )
 
         result["signals"].append(
-            "Tax configuration may be changeable."
+            "Dynamic tax configuration is present."
         )
 
+        result["signals"].append(
+            "Current tax values may not represent "
+            "the maximum tax that can be configured."
+        )
+        
     # =====================================================
     # TAX RISK
     # =====================================================
