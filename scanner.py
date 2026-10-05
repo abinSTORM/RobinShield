@@ -626,8 +626,9 @@ def print_lp_safety(
 def analyze_holders(
     token_address,
     liquidity=None,
+    deep=False,
 ):
-
+    
     print_section(
         "HOLDER DISTRIBUTION",
         "👥"
@@ -655,7 +656,8 @@ def analyze_holders(
         # -------------------------------------------------
 
         holders = get_holders(
-            token_address
+            token_address,
+            deep=deep,
         )
 
         if not holders:
@@ -1403,6 +1405,27 @@ def analyze_tax_section(
             tax_analysis
         )
 
+        dynamic_tax = tax_analysis.get(
+            "dynamic_tax",
+            False,
+        )
+
+        tax_setters = tax_analysis.get(
+            "tax_setters",
+            [],
+        )
+
+        print(
+            f"Dynamic tax: "
+            f"{'YES' if dynamic_tax else 'NO'}"
+        )
+
+        if tax_setters:
+            print(
+                "Tax setters: "
+                + ", ".join(tax_setters)
+            )
+
         buy_tax = tax_analysis.get(
             "buy_tax"
         )
@@ -1585,6 +1608,7 @@ def analyze_ownership_section(
 def analyze_supply_section(
     token_address,
     token_abi,
+    ownership_analysis=None,
 ):
 
     from engines.supply_analysis import (
@@ -1612,6 +1636,7 @@ def analyze_supply_section(
 
         supply_analysis = analyze_supply(
             abi=token_abi,
+            ownership_analysis=ownership_analysis,
         )
 
     except Exception as e:
@@ -1738,6 +1763,7 @@ def analyze_supply_section(
 def analyze_trading_restrictions_section(
     token_address,
     token_abi,
+    ownership_analysis=None,
 ):
 
     print_section(
@@ -1779,13 +1805,12 @@ def analyze_trading_restrictions_section(
 
     try:
 
-        trading_restrictions = (
-            analyze_trading_restrictions(
-                token_address,
-                token_abi,
-            )
+        trading_restrictions = analyze_trading_restrictions(
+            token_address,
+            token_abi,
+            ownership_analysis,
         )
-
+        
         print_analysis_header(
             trading_restrictions
         )
@@ -1799,6 +1824,10 @@ def analyze_trading_restrictions_section(
         )
 
     except Exception as e:
+
+        print(
+            f"DEBUG Trading restrictions error: {e}"
+        )
 
         trading_restrictions = {
             "status": "UNKNOWN",
@@ -2372,6 +2401,69 @@ def analyze_deep_swap_section(
                 )
 
                 if test.get(
+                    "token_spent"
+                ) is not None:
+
+                    print(
+                        f"  Token spent: "
+                        f"{test.get('token_spent')}"
+                    )
+
+                if test.get(
+                    "event_token_spent"
+                ) is not None:
+
+                    print(
+                        f"  Event token spent: "
+                        f"{test.get('event_token_spent')}"
+                    )
+
+                if test.get(
+                    "quote_received"
+                ) is not None:
+
+                    print(
+                        f"  Quote received: "
+                        f"{test.get('quote_received')}"
+                    )
+
+                if test.get(
+                    "event_quote_received"
+                ) is not None:
+
+                    print(
+                        f"  Event quote received: "
+                        f"{test.get('event_quote_received')}"
+                    )
+
+                if test.get(
+                    "runtime_token_consumption_percent"
+                ) is not None:
+
+                    print(
+                        f"  Runtime token consumption: "
+                        f"{test.get('runtime_token_consumption_percent'):.4f}%"
+                    )
+
+                if test.get(
+                    "runtime_sell_observation"
+                ):
+
+                    print(
+                        f"  Runtime SELL observation: "
+                        f"{test.get('runtime_sell_observation')}"
+                    )
+
+                if test.get(
+                    "error"
+                ):
+
+                    print(
+                        f"  Error: "
+                        f"{test.get('error')}"
+                    )
+
+                if test.get(
                     "error"
                 ):
 
@@ -2518,6 +2610,7 @@ def scan_token(
     holders, holder_risk = analyze_holders(
         token_address,
         liquidity,
+        deep=DEEP_SCAN,
     )
 
     # =====================================================
@@ -2600,6 +2693,7 @@ def scan_token(
         analyze_trading_restrictions_section(
             token_address,
             token_abi,
+            ownership_analysis,
         )
     )
     
@@ -2611,6 +2705,7 @@ def scan_token(
         analyze_supply_section(
             token_address,
             token_abi,
+            ownership_analysis,
         )
     )
 
@@ -2790,6 +2885,7 @@ def scan_token(
         overall = calculate_overall_risk(
             liquidity=liquidity,
             lp_safety=lp_safety,
+            holders=holders,
             holder_risk=holder_risk,
             contract_security=contract_security,
             trade_safety=trade_safety,
@@ -2800,7 +2896,6 @@ def scan_token(
             trading_limits=trading_restrictions,
             proxy_info=proxy_info,
             implementation_info=implementation_info,
-            swap_simulation=swap_simulation,
         )
 
     except Exception as e:
@@ -2831,10 +2926,24 @@ def scan_token(
                 "implementation"
             )
 
-            proxy_warning = (
-                "Token uses an "
-                f"{proxy_info.get('type', 'supported')} proxy."
+            proxy_type = str(
+                proxy_info.get(
+                    "type",
+                    "supported",
+                )
             )
+
+            if proxy_type.upper() == "ERC-1167":
+
+                proxy_warning = (
+                    "Token uses an ERC-1167 minimal proxy."
+                )
+
+            else:
+
+                proxy_warning = (
+                    f"Token uses an {proxy_type} proxy."
+                )
 
             implementation_warning = None
 

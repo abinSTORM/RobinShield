@@ -122,10 +122,29 @@ def _is_admin_function(name: str) -> bool:
         "getroleadmin",
     }
 
+def _is_role_function(name: str) -> bool:
+    """
+    Detect common role/access-control functions that may
+    participate in mint authorization.
+    """
+
+    normalized = _normalize_name(name)
+
+    return normalized in {
+        "hasrole",
+        "grantrole",
+        "revokerole",
+        "renouncerole",
+        "getroleadmin",
+        "getrolemember",
+        "getrolemembercount",
+    }
+
 
 def analyze_supply(
     abi: Optional[List[Dict[str, Any]]] = None,
     bytecode: Optional[Any] = None,
+    ownership_analysis: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
 
     signals = []
@@ -152,6 +171,7 @@ def analyze_supply(
     supply_controls = []
     burn_functions = []
     admin_functions = []
+    role_functions = []
 
     # -----------------------------------------------------
     # ABI analysis
@@ -238,6 +258,12 @@ def analyze_supply(
                     name
                 )
 
+            if _is_role_function(name):
+
+                role_functions.append(
+                    name
+                )
+
     mint_functions = sorted(
         set(mint_functions)
     )
@@ -252,6 +278,10 @@ def analyze_supply(
 
     admin_functions = sorted(
         set(admin_functions)
+    )
+
+    role_functions = sorted(
+        set(role_functions)
     )
 
     # -----------------------------------------------------
@@ -307,18 +337,84 @@ def analyze_supply(
             + "."
         )
 
-        if admin_functions:
+        ownership_known = False
+        ownership_renounced = False
+        owner = None
+
+        if isinstance(ownership_analysis, dict):
+
+            ownership_known = bool(
+                ownership_analysis.get(
+                    "owner_readable",
+                    False
+                )
+            )
+
+            ownership_renounced = bool(
+                ownership_analysis.get(
+                    "ownership_renounced",
+                    False
+                )
+            )
+
+            owner = ownership_analysis.get(
+                "owner"
+            )
+
+        role_control_detected = bool(role_functions)
+
+        if role_control_detected:
 
             signals.append(
-                "Ownership/admin functions are "
-                "also exposed; mint authorization "
-                "may be administrator-controlled."
+                "Role-based access-control functions detected: "
+                + ", ".join(role_functions)
+                + "."
+            )
+
+        # -------------------------------------------------
+        # ACTIVE OWNER
+        # -------------------------------------------------
+
+        if ownership_known and owner and not ownership_renounced:
+
+            signals.append(
+                "A state-changing mint function was detected "
+                "while an active owner is present."
             )
 
             warnings.append(
-                "A state-changing mint function was "
-                "detected and administrator-related "
-                "functions are also present."
+                "Mint authorization may remain under "
+                "privileged owner control."
+            )
+
+            return {
+                "status": "WARNING",
+                "risk": "HIGH",
+                "confidence": "HIGH",
+                "mintable": True,
+                "mint_functions": mint_functions,
+                "supply_controls": supply_controls,
+                "burn_functions": burn_functions,
+                "signals": signals,
+                "warnings": warnings,
+            }
+
+        # -------------------------------------------------
+        # ROLE-BASED AUTHORIZATION
+        # -------------------------------------------------
+
+        if role_control_detected:
+
+            signals.append(
+                "Mint functionality may be controlled "
+                "through role-based access control."
+            )
+
+            warnings.append(
+                "Mint authorization appears to involve "
+                "role-based access control; the specific "
+                "authorized role could not be confirmed "
+                "from the ABI alone."
             )
 
             return {
@@ -333,10 +429,42 @@ def analyze_supply(
                 "warnings": warnings,
             }
 
+        # -------------------------------------------------
+        # RENOUNCED OWNERSHIP
+        # -------------------------------------------------
+
+        if ownership_renounced:
+
+            signals.append(
+                "A state-changing mint function exists, "
+                "but ownership appears to be renounced."
+            )
+
+            warnings.append(
+                "Mint authorization could not be confirmed "
+                "as owner-controlled because ownership appears "
+                "to be renounced."
+            )
+
+            return {
+                "status": "WARNING",
+                "risk": "MEDIUM",
+                "confidence": "HIGH",
+                "mintable": True,
+                "mint_functions": mint_functions,
+                "supply_controls": supply_controls,
+                "burn_functions": burn_functions,
+                "signals": signals,
+                "warnings": warnings,
+            }
+
+        # -------------------------------------------------
+        # OWNER UNKNOWN
+        # -------------------------------------------------
+
         warnings.append(
-            "A state-changing mint function was "
-            "detected, but its authorization could "
-            "not be fully determined from the ABI."
+            "A state-changing mint function was detected, "
+            "but its authorization could not be confirmed."
         )
 
         return {
@@ -350,7 +478,7 @@ def analyze_supply(
             "signals": signals,
             "warnings": warnings,
         }
-
+    
     # -----------------------------------------------------
     # Other state-changing supply control
     # -----------------------------------------------------
