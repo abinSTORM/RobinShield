@@ -1468,6 +1468,78 @@ def analyze_tax_section(
                 f"{general_tax['percentage']:.2f}%"
             )
 
+        tax_expiration_time = tax_analysis.get(
+            "tax_expiration_time"
+        )
+
+        if tax_expiration_time is not None:
+            print(
+                f"Tax expiration time: "
+                f"{tax_expiration_time}"
+            )
+
+        tax_expiration_active = tax_analysis.get(
+            "tax_expiration_active"
+        )
+
+        if tax_expiration_active is not None:
+            print(
+                "Tax expiration active: "
+                f"{'YES' if tax_expiration_active else 'NO'}"
+            )
+
+        tax_state_functions = tax_analysis.get(
+            "tax_state_functions",
+            [],
+        )
+
+        if tax_state_functions:
+            print(
+                "Tax state functions: "
+                + ", ".join(
+                    tax_state_functions
+                )
+            )
+
+        tax_state = tax_analysis.get(
+            "tax_state"
+        )
+
+        tax_state_name = tax_analysis.get(
+            "tax_state_name"
+        )
+
+        if tax_state is not None:
+            if tax_state_name is not None:
+                print(
+                    f"Tax state: "
+                    f"{tax_state} ({tax_state_name})"
+                )
+            else:
+                print(
+                    f"Tax state: {tax_state}"
+                )
+
+        time_dependent_tax = tax_analysis.get(
+            "time_dependent_tax"
+        )
+
+        if time_dependent_tax is not None:
+            print(
+                "Time-dependent tax: "
+                f"{'YES' if time_dependent_tax else 'NO'}"
+            )
+
+        tax_expiration_status = tax_analysis.get(
+            "tax_expiration_status"
+        )
+
+        if tax_expiration_status is not None:
+            print(
+                f"Tax expiration status: "
+                f"{tax_expiration_status}"
+            )
+
         print_warnings(
             tax_analysis
         )
@@ -2454,6 +2526,17 @@ def analyze_deep_swap_section(
                         f"{test.get('runtime_sell_observation')}"
                     )
 
+                if (
+                    swap_simulation.get(
+                        "runtime_sell_tax"
+                    ) is not None
+                ):
+
+                    print(
+                        f"  Runtime SELL tax: "
+                        f"{swap_simulation.get('runtime_sell_tax'):.4f}%"
+                    )
+
                 if test.get(
                     "error"
                 ):
@@ -2475,6 +2558,17 @@ def analyze_deep_swap_section(
         print_warnings(
             swap_simulation
         )
+
+        if (
+            swap_simulation.get(
+                "runtime_buy_tax"
+            ) is not None
+        ):
+
+            print(
+                f"Runtime BUY tax: "
+                f"{swap_simulation.get('runtime_buy_tax'):.4f}%"
+            )
 
         print_signals(
             swap_simulation

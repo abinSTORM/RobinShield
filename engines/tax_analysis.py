@@ -1,8 +1,16 @@
 from web3 import Web3
 
-from config import RPC_URL
+from config import (
+    RPC_URL,
+)
+
 from core.bytecode import analyze_bytecode
 
+from detectors.swap_simulator import (
+    start_anvil,
+    stop_anvil,
+    ANVIL_RPC_URL,
+)
 
 # =========================================================
 # TAX FUNCTION NAMES
@@ -31,6 +39,19 @@ GENERAL_TAX_FUNCTIONS = [
     "feeRate",
 ]
 
+TAX_STATE_FUNCTIONS = [
+    "taxExpirationTime",
+    "currentTaxExpirationTime",
+    "state",
+]
+
+TAX_STATE_NAMES = {
+    0: "BondingCurve",
+    1: "Migrating",
+    2: "TaxEnforcedAntiFarmer",
+    3: "TaxEnforced",
+    4: "TaxFree",
+}
 
 TAX_SETTER_FUNCTIONS = [
     "setTax",
@@ -289,6 +310,155 @@ def get_output_type(
         "type"
     )
 
+def analyze_tax_expiration_behavior(
+    address,
+    abi,
+    expiration_time,
+):
+    result = {
+        "tested": False,
+        "status": "SKIPPED",
+        "before_state": None,
+        "after_state": None,
+        "before_buy_tax": None,
+        "after_buy_tax": None,
+        "before_sell_tax": None,
+        "after_sell_tax": None,
+        "behavior": None,
+        "reason": None,
+    }
+
+    if expiration_time is None:
+        result["reason"] = (
+            "No tax expiration timestamp detected."
+        )
+        return result
+
+    process = None
+
+    try:
+        from web3 import Web3
+
+        process = start_anvil()
+
+        fork_w3 = get_web3(
+            ANVIL_RPC_URL
+        )
+
+        token_address = (
+            Web3.to_checksum_address(
+                address
+            )
+        )
+
+        token_contract = (
+            fork_w3.eth.contract(
+                address=token_address,
+                abi=abi,
+            )
+        )
+
+        def read_value(
+            function_name,
+        ):
+            try:
+                function = getattr(
+                    token_contract.functions,
+                    function_name,
+                )
+
+                return function().call()
+
+            except Exception:
+                return None
+
+        result["before_state"] = (
+            read_value("state")
+        )
+
+        result["before_buy_tax"] = (
+            read_value("buyTaxRate")
+        )
+
+        result["before_sell_tax"] = (
+            read_value("sellTaxRate")
+        )
+
+        current_block = (
+            fork_w3.eth.get_block(
+                "latest"
+            )
+        )
+
+        current_timestamp = int(
+            current_block["timestamp"]
+        )
+
+        target_timestamp = (
+            max(
+                current_timestamp,
+                int(expiration_time),
+            )
+            + 1
+        )
+
+        fork_w3.provider.make_request(
+            "evm_setNextBlockTimestamp",
+            [target_timestamp],
+        )
+
+        fork_w3.provider.make_request(
+            "evm_mine",
+            [],
+        )
+
+        result["after_state"] = (
+            read_value("state")
+        )
+
+        result["after_buy_tax"] = (
+            read_value("buyTaxRate")
+        )
+
+        result["after_sell_tax"] = (
+            read_value("sellTaxRate")
+        )
+
+        before_values = (
+            result["before_state"],
+            result["before_buy_tax"],
+            result["before_sell_tax"],
+        )
+
+        after_values = (
+            result["after_state"],
+            result["after_buy_tax"],
+            result["after_sell_tax"],
+        )
+
+        if before_values != after_values:
+            result["behavior"] = (
+                "CHANGED_AFTER_EXPIRATION"
+            )
+            result["status"] = "PASS"
+        else:
+            result["behavior"] = (
+                "NO_CHANGE_AFTER_EXPIRATION"
+            )
+            result["status"] = "INFO"
+
+        result["tested"] = True
+
+    except Exception as exc:
+        result["status"] = "ERROR"
+        result["reason"] = str(exc)
+
+    finally:
+        stop_anvil(
+            process
+        )
+
+    return result
 
 # =========================================================
 # TAX VALUE NORMALIZATION
@@ -617,6 +787,19 @@ def analyze_tax(
         + general_getters
     )
 
+    tax_state_functions = [
+        name
+        for name in TAX_STATE_FUNCTIONS
+        if find_function_abi(
+            abi,
+            name,
+        )
+    ]
+
+    result["tax_state_functions"] = (
+        tax_state_functions
+    )
+
     result["setters"] = setters
     result["setter_permissions"] = (
         analyze_tax_setter_permissions(
@@ -627,6 +810,96 @@ def analyze_tax(
 
     result["dynamic_tax"] = bool(
         setters
+    )
+
+    result["tax_expiration_active"] = None
+
+    result["tax_expiration_time"] = None
+
+    result["tax_state"] = None
+
+    for function_name in tax_state_functions:
+        if function_name in (
+            "taxExpirationTime",
+            "currentTaxExpirationTime",
+        ):
+            value = call_zero_argument_function(
+                address,
+                abi,
+                function_name,
+            )
+
+            if value is not None:
+                try:
+                    result["tax_expiration_time"] = int(
+                        value
+                    )
+                except (
+                    TypeError,
+                    ValueError,
+                ):
+                    pass
+
+                break
+
+    if result["tax_expiration_time"] is not None:
+        try:
+            w3 = get_web3()
+            current_block_timestamp = (
+                w3.eth.get_block("latest")["timestamp"]
+            )
+
+            result["tax_expiration_active"] = (
+                result["tax_expiration_time"]
+                > current_block_timestamp
+            )
+        except Exception:
+            result["tax_expiration_active"] = None
+
+    if "state" in tax_state_functions:
+        state_value = call_zero_argument_function(
+            address,
+            abi,
+            "state",
+        )
+
+        if state_value is not None:
+            try:
+                result["tax_state"] = int(
+                    state_value
+                )
+            except (
+                TypeError,
+                ValueError,
+            ):
+                result["tax_state"] = None
+
+    result["tax_state_name"] = None
+
+    if result["tax_state"] is not None:
+        result["tax_state_name"] = TAX_STATE_NAMES.get(
+            result["tax_state"],
+            "Unknown",
+        )
+
+    result["time_dependent_tax"] = (
+        result["tax_expiration_time"] is not None
+    )
+
+    result["tax_expiration_status"] = None
+
+    if result["tax_expiration_time"] is not None:
+        if result["tax_expiration_active"] is True:
+            result["tax_expiration_status"] = "ACTIVE"
+        elif result["tax_expiration_active"] is False:
+            result["tax_expiration_status"] = "EXPIRED"
+
+    result["tax_expiration_behavior"] = (
+        analyze_tax_expiration_behavior(
+            address,
+            abi,
+            result["tax_expiration_time"],
+        )
     )
 
     result["tax_setters"] = setters
@@ -847,7 +1120,25 @@ def analyze_tax(
             "Current tax values may not represent "
             "the maximum tax that can be configured."
         )
-        
+
+    if tax_state_functions:
+        result["signals"].append(
+            "Tax expiration/state mechanism detected: "
+            + ", ".join(tax_state_functions)
+        )
+
+        if result.get(
+            "tax_expiration_active"
+        ) is True:
+            result["signals"].append(
+                "Tax expiration mechanism is currently active."
+            )
+        elif result.get(
+            "tax_expiration_active"
+        ) is False:
+            result["signals"].append(
+                "Tax expiration timestamp has already passed."
+            )
     # =====================================================
     # TAX RISK
     # =====================================================
