@@ -26,6 +26,74 @@ def _add_unique(items, message):
         items.append(message)
 
 
+def _risk_dimensions(breakdown, honeypot, swap_simulation, admin_control_audit):
+    """Explain market/exit risk separately from contract sellability evidence."""
+    breakdown = _safe_dict(breakdown)
+    market_keys = {
+        "Liquidity",
+        "Holder concentration",
+        "LP safety",
+        "Trade simulation",
+        "Evidence: No liquidity",
+        "Evidence: Extreme concentration",
+        "Evidence: Top 10 concentration",
+    }
+    market_components = {
+        key: value
+        for key, value in breakdown.items()
+        if key in market_keys and isinstance(value, (int, float)) and value > 0
+    }
+    market_points = sum(market_components.values())
+    if market_points >= 50:
+        market_status = "HIGH"
+    elif market_points >= 25:
+        market_status = "ELEVATED"
+    else:
+        market_status = "LOWER"
+
+    honeypot_status = _status(_safe_dict(honeypot).get("status"))
+    deep_swap_status = _status(_safe_dict(swap_simulation).get("status"))
+    admin_status = _status(_safe_dict(admin_control_audit).get("status"))
+    if honeypot_status in ("FAIL", "HIGH", "CRITICAL") or deep_swap_status in (
+        "FAIL", "HIGH", "CRITICAL"
+    ):
+        sellability_status = "FAIL"
+        sellability_summary = "A tested sellability check failed in the scanned state."
+    elif honeypot_status == "PASS" and deep_swap_status == "PASS":
+        sellability_status = "REVIEW" if admin_status in ("REVIEW", "UNKNOWN", "UNAVAILABLE") else "PASS_FOR_TESTED_STATE"
+        sellability_summary = (
+            "Tested buys and sells succeeded in this scan; this does not guarantee future swaps or other wallets."
+        )
+    else:
+        sellability_status = "INCONCLUSIVE"
+        sellability_summary = "Buy/sell behavior was not fully verified by the available checks."
+
+    control_components = {
+        key: value
+        for key, value in breakdown.items()
+        if key not in market_keys
+        and key != "Evidence-based floors"
+        and isinstance(value, (int, float))
+        and value > 0
+    }
+    return {
+        "market_and_exit_risk": {
+            "status": market_status,
+            "severity_points": market_points,
+            "components": market_components,
+            "summary": "Liquidity, holder concentration, LP custody, and trading cost can make entry or exit difficult; these facts alone do not establish fraud.",
+        },
+        "contract_and_sellability": {
+            "status": sellability_status,
+            "tested_honeypot_status": honeypot_status,
+            "deep_router_swap_status": deep_swap_status,
+            "admin_control_status": admin_status,
+            "risk_components": control_components,
+            "summary": sellability_summary,
+        },
+    }
+
+
 def _evidence_assessment(
     security,
     liquidity,
@@ -645,6 +713,24 @@ def _lp_penalty(
         _add_unique(
             warnings,
             "A large portion of LP tokens remains active.",
+        )
+
+        return 20
+
+    if safety == "UNLOCKED":
+
+        _add_unique(
+            warnings,
+            "Most or all LP tokens are held by externally owned wallets and appear directly withdrawable.",
+        )
+
+        return 25
+
+    if safety == "PARTIALLY_UNLOCKED":
+
+        _add_unique(
+            warnings,
+            "A verified portion of LP tokens is held by externally owned wallets and appears directly withdrawable.",
         )
 
         return 20
@@ -2407,6 +2493,13 @@ def calculate_overall_risk(
         swap_simulation,
     )
 
+    risk_dimensions = _risk_dimensions(
+        penalty_breakdown,
+        honeypot,
+        swap_simulation,
+        kwargs.get("admin_control_audit"),
+    )
+
     # =====================================================
     # RETURN
     # =====================================================
@@ -2424,6 +2517,7 @@ def calculate_overall_risk(
         "unresolved_checks": evidence_assessment["unresolved_checks"],
         "beginner_guidance": guidance,
         "score_meaning": "Severity points from detected evidence; not scam probability and not a trade block.",
+        "risk_dimensions": risk_dimensions,
         "breakdown": penalty_breakdown,
         "warnings": warnings,
         "positive_signals": positives,

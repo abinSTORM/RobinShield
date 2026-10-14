@@ -36,6 +36,7 @@ from core.abi import get_abi
 from core.bytecode import analyze_bytecode
 from analysis.token_identity import analyze_token_identity
 from engines.admin_control_audit import analyze_admin_controls
+from analysis.deployer_history import analyze_deployer_history
 
 
 # =========================================================
@@ -567,6 +568,8 @@ def analyze_lp_safety(
         "reason": "LP holder distribution could not be determined.",
         "warnings": [],
         "signals": [],
+        "lock_status_verified": False,
+        "holder_distribution": None,
     }
 
     if not liquidity.get(
@@ -684,7 +687,7 @@ def print_lp_safety(
     )
 
     print(
-        f"LP not at recognized burn addresses (lock status unknown): "
+        f"LP outside recognized burn addresses: "
         f"{active_lp if active_lp is not None else 'UNKNOWN'}"
     )
 
@@ -697,6 +700,25 @@ def print_lp_safety(
         f"Reason: "
         f"{lp_safety.get('reason')}"
     )
+
+    holder_distribution = lp_safety.get("holder_distribution")
+    if isinstance(holder_distribution, dict):
+        print(
+            "LP holder coverage: "
+            f"{holder_distribution.get('status', 'UNKNOWN')} "
+            f"({holder_distribution.get('accounted_percentage') or 0:.4f}%)"
+        )
+        print(
+            "LP held by EOAs: "
+            f"{holder_distribution.get('eoa_percentage_of_supply') or 0:.4f}%"
+        )
+        for holder in holder_distribution.get("holders", [])[:5]:
+            print(
+                "  Holder: "
+                f"{holder.get('address')} "
+                f"({holder.get('holder_type')}, "
+                f"{holder.get('percentage_of_supply') or 0:.4f}% LP)"
+            )
 
 
 # =========================================================
@@ -3037,6 +3059,36 @@ def scan_token(
     for warning in token_identity.get("warnings", []):
         print(f"⚠️ {warning}")
 
+    deployer_history = analyze_deployer_history(token_address)
+    print_section("DEPLOYER HISTORY / FUNDING CONTEXT", "🧾")
+    print(f"Explorer evidence: {deployer_history.get('status', 'UNAVAILABLE')}")
+    if deployer_history.get("deployer"):
+        print(
+            f"Creation sender: {deployer_history['deployer']} "
+            f"({deployer_history.get('deployer_type', 'UNKNOWN')})"
+        )
+    if deployer_history.get("prior_contract_creations") is not None:
+        qualifier = "complete indexed history" if deployer_history.get("history_complete") else "partial history; lower bound"
+        print(
+            "Earlier contract creations found: "
+            f"{deployer_history['prior_contract_creations']} ({qualifier})"
+        )
+    funding = deployer_history.get("recent_funding")
+    if funding:
+        print(
+            "Recent inbound funding: observed within 24 hours before deployment; "
+            f"sender {funding.get('from') or 'unresolved'}; this is context, not proof of coordination."
+        )
+    else:
+        print(
+            "Recent inbound funding: "
+            + ("none found in indexed data" if deployer_history.get("funding_history_complete") else "UNKNOWN / not fully checked")
+        )
+    for signal in deployer_history.get("signals", []):
+        print(f"ℹ️ {signal}")
+    for warning in deployer_history.get("warnings", []):
+        print(f"⚠️ {warning}")
+
     admin_control_audit = analyze_admin_controls(
         token_address,
         abi=combined_analysis_abi,
@@ -3284,6 +3336,7 @@ def scan_token(
             implementation_info=implementation_info,
             admin_control_audit=admin_control_audit,
             token_identity=token_identity,
+            deployer_history=deployer_history,
             abi_available=token_abi is not None,
         )
 
@@ -3389,6 +3442,7 @@ def scan_token(
         for finding in (
             admin_control_audit.get("warnings", [])
             + token_identity.get("warnings", [])
+            + deployer_history.get("warnings", [])
         ):
             if finding not in overall.setdefault("warnings", []):
                 overall["warnings"].append(finding)
@@ -3430,7 +3484,7 @@ def scan_token(
     # =====================================================
 
     print(
-        f"Risk score: {overall.get('score', 100)}/100 "
+        f"Overall risk severity: {overall.get('score', 100)}/100 "
         f"(score band {overall.get('score_band', overall.get('risk', 'HIGH'))})"
     )
 
@@ -3446,14 +3500,47 @@ def scan_token(
 
     score_band = str(overall.get("score_band", overall.get("risk", "UNKNOWN"))).upper()
     assessment = str(overall.get("assessment", "")).upper()
-    if score_band in ("CRITICAL", "HIGH"):
+    dimensions = overall.get("risk_dimensions", {})
+    market_dimension = dimensions.get("market_and_exit_risk", {}) if isinstance(dimensions, dict) else {}
+    contract_dimension = dimensions.get("contract_and_sellability", {}) if isinstance(dimensions, dict) else {}
+    if (
+        score_band in ("CRITICAL", "HIGH")
+        and market_dimension.get("status") == "HIGH"
+        and contract_dimension.get("status") in ("REVIEW", "PASS_FOR_TESTED_STATE")
+    ):
+        print("Beginner guidance: High market/exit risk. The scan did not prove this token is a scam; thin liquidity, concentrated holdings, or withdrawable LP can make trading risky.")
+    elif score_band in ("CRITICAL", "HIGH"):
         print("Beginner guidance: Avoid buying this token based on this scan; investigate the listed risks first.")
     elif assessment in ("INCONCLUSIVE", "LIMITED"):
         print("Beginner guidance: This scan could not verify important safety checks. Do not treat the token as safe.")
     else:
         print("Beginner guidance: This scan is not a guarantee of safety; verify the evidence before making a decision.")
     print("RobinShield reports risk; it does not execute or block trades on external wallets or exchanges.")
-    print("The risk score is a severity score from detected evidence, not the probability that a token is a scam.")
+    print("The overall score measures severity of detected risks; it is not a probability that the token is a scam.")
+
+    if isinstance(dimensions, dict):
+        market = dimensions.get("market_and_exit_risk", {})
+        contract = dimensions.get("contract_and_sellability", {})
+        if isinstance(market, dict) and isinstance(contract, dict):
+            print()
+            print("Risk dimensions:")
+            print(
+                "- Market / exit risk: "
+                f"{market.get('status', 'UNKNOWN')} "
+                f"({market.get('severity_points', 0)} weighted points). "
+                f"{market.get('summary', '')}"
+            )
+            print(
+                "- Contract / sellability: "
+                f"{contract.get('status', 'UNKNOWN')}. "
+                f"{contract.get('summary', '')}"
+            )
+            print(
+                "  Tested buy/sell: "
+                f"honeypot={contract.get('tested_honeypot_status', 'UNKNOWN')}, "
+                f"deep router={contract.get('deep_router_swap_status', 'UNKNOWN')}; "
+                f"admin controls={contract.get('admin_control_status', 'UNKNOWN')}"
+            )
 
     breakdown = overall.get(
         "breakdown",
@@ -3598,6 +3685,7 @@ def scan_token(
             "meaning": "Explorer source/ABI availability is not a safety guarantee; behavior and sellability are assessed separately and remain limited to the checks performed.",
         },
         "token_identity": token_identity,
+        "deployer_history": deployer_history,
         "mode": "deep" if DEEP_SCAN else "normal",
         "analyses": {
             "liquidity": liquidity,
@@ -3611,6 +3699,7 @@ def scan_token(
             "ownership": ownership_analysis,
             "trading_restrictions": trading_restrictions,
             "admin_control_audit": admin_control_audit,
+            "deployer_history": deployer_history,
             "supply": supply_analysis,
             "initial_distribution": initial_distribution,
             "trade_safety": trade_safety,
