@@ -26,6 +26,143 @@ def _add_unique(items, message):
         items.append(message)
 
 
+def _evidence_assessment(
+    security,
+    liquidity,
+    lp_safety,
+    trade_simulation,
+    swap_simulation,
+    honeypot,
+    ownership,
+    warnings,
+    abi_available=None,
+):
+    """Separate evidence coverage from the evidence-based risk score."""
+    gaps = []
+
+    security_items = _safe_list(
+        security.get("security", []) if isinstance(security, dict) else security
+    )
+    verified = any(
+        isinstance(item, dict)
+        and str(item.get("check", "")).strip().lower() in ("contract verification", "verification")
+        and _status(item.get("status")) == "PASS"
+        for item in security_items
+    )
+    if abi_available is False or (abi_available is None and not verified):
+        gaps.append("verified source/ABI unavailable")
+
+    liquidity = _safe_dict(liquidity)
+    liquidity_usd = liquidity.get(
+        "liquidity_usd",
+        liquidity.get(
+            "total_liquidity_usd",
+            liquidity.get("total_discovered_liquidity_usd"),
+        ),
+    )
+    if (
+        _status(liquidity.get("risk")) in ("UNKNOWN", "UNAVAILABLE", "")
+        or liquidity.get("found") is not True
+        or float_or_none(liquidity_usd) is None
+    ):
+        gaps.append("usable pool liquidity could not be measured")
+
+    if _liquidity_unavailable(liquidity):
+        _add_unique(gaps, "chain RPC was unavailable for on-chain checks")
+
+    if any(
+        isinstance(item, dict)
+        and str(item.get("check", "")).strip().lower() == "bytecode behavior"
+        and _status(item.get("status")) in ("UNKNOWN", "UNAVAILABLE", "")
+        for item in security_items
+    ):
+        gaps.append("contract bytecode behavior could not be assessed")
+
+    ownership = _safe_dict(ownership)
+    if (
+        ownership.get("owner_readable") is False
+        and any(
+            "could not be read" in str(message).lower()
+            for message in _safe_list(ownership.get("warnings"))
+        )
+    ):
+        gaps.append("current owner and related permissions could not be verified")
+
+    lp_safety = _safe_dict(lp_safety)
+    if (
+        _status(lp_safety.get("safety")) in ("UNKNOWN", "UNAVAILABLE", "")
+        or lp_safety.get("lock_status_verified") is not True
+    ):
+        gaps.append("LP lock/burn safety could not be assessed")
+
+    trade_simulation = _safe_dict(trade_simulation)
+    buy = _safe_dict(trade_simulation.get("buy"))
+    sell = _safe_dict(trade_simulation.get("sell"))
+    if not (
+        buy.get("success") is True
+        and sell.get("success") is True
+        and buy.get("simulated", True) is True
+        and sell.get("simulated", True) is True
+    ):
+        gaps.append("router BUY and SELL simulation unavailable or incomplete")
+
+    swap_simulation = _safe_dict(swap_simulation)
+    if swap_simulation.get("deep") is True and not (
+        swap_simulation.get("tested") is True
+        and _status(swap_simulation.get("status")) == "PASS"
+    ):
+        gaps.append("deep router execution test unavailable or incomplete")
+
+    honeypot = _safe_dict(honeypot)
+    honeypot_buy = _safe_dict(honeypot.get("buy"))
+    honeypot_sell = _safe_dict(honeypot.get("sell"))
+    if not (
+        honeypot_buy.get("tested") is True
+        and honeypot_buy.get("success") is True
+        and honeypot_sell.get("tested") is True
+        and honeypot_sell.get("success") is True
+    ):
+        gaps.append("honeypot BUY/SELL transfer simulation unavailable or incomplete")
+
+    # Missing evidence is not itself a danger score. It does limit the
+    # conclusion we can responsibly draw from that score.
+    assessment = (
+        "INCONCLUSIVE" if len(gaps) >= 2
+        else "LIMITED" if gaps
+        else "ASSESSED"
+    )
+    confidence = "LOW" if len(gaps) >= 2 else "MEDIUM" if gaps else "HIGH"
+    if gaps:
+        _add_unique(
+            warnings,
+            "Assessment confidence is " + confidence + "; unresolved checks: "
+            + "; ".join(gaps) + ".",
+        )
+    return {
+        "status": assessment,
+        "coverage_confidence": confidence,
+        "unresolved_checks": gaps,
+    }
+
+
+def float_or_none(value):
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _liquidity_unavailable(liquidity):
+    liquidity = _safe_dict(liquidity)
+    if _status(liquidity.get("analysis_status")) == "UNAVAILABLE":
+        return True
+    reason = str(liquidity.get("reason", "")).lower()
+    return any(
+        marker in reason
+        for marker in ("rpc", "connect", "connection", "timed out", "timeout")
+    )
+
+
 # =========================================================
 # CONTRACT SECURITY
 # =========================================================
@@ -177,6 +314,20 @@ def _security_penalty(
 
         elif status == "WARNING":
 
+            # TX.origin by itself is a weak bytecode signal. Keep it visible
+            # in the report, but do not score it as a confirmed security risk
+            # when no delegatecall or selfdestruct was observed.
+            if check_lower in (
+                "bytecode behavior",
+                "implementation bytecode behavior",
+            ):
+                details = _safe_dict(item.get("details"))
+                tx_origin = int(details.get("tx_origin", 0) or 0)
+                delegatecall = int(details.get("delegatecall", 0) or 0)
+                selfdestruct = int(details.get("selfdestruct", 0) or 0)
+                if tx_origin > 0 and delegatecall == 0 and selfdestruct == 0:
+                    continue
+
             if check_lower == "blacklist":
                 penalty += 10
 
@@ -225,6 +376,13 @@ def _liquidity_penalty(
     found = liquidity.get(
         "found"
     )
+
+    if _liquidity_unavailable(liquidity):
+        _add_unique(
+            warnings,
+            "Liquidity could not be checked because the chain RPC was unavailable.",
+        )
+        return 0
 
     risk = _status(
         liquidity.get(
@@ -295,7 +453,7 @@ def _liquidity_penalty(
             "Liquidity is relatively low.",
         )
 
-        return 18
+        return 20
 
     if risk == "LOW":
 
@@ -593,6 +751,20 @@ def _ownership_penalty(
             "risk",
         )
     )
+
+    owner_unreadable = (
+        ownership.get("owner_readable") is False
+        and any(
+            "could not be read" in str(message).lower()
+            for message in _safe_list(ownership.get("warnings"))
+        )
+    )
+    if owner_unreadable:
+        _add_unique(
+            warnings,
+            "Current owner could not be read; ownership risk is unknown, not confirmed active control.",
+        )
+        return 0
 
     if (
         status == "FAIL"
@@ -983,6 +1155,7 @@ def _proxy_penalty(
     implementation,
     warnings,
 ):
+
     proxy = _safe_dict(
         proxy
     )
@@ -992,46 +1165,174 @@ def _proxy_penalty(
     )
 
     if not proxy.get(
-        "detected",
-        False,
+        "detected"
     ):
 
         return 0
 
-    proxy_type = proxy.get(
-        "type",
-        "UNKNOWN",
-    )
-
-    _add_unique(
-        warnings,
-        f"Token uses an {proxy_type} proxy.",
-    )
-
-    implementation_address = (
+    proxy_type = str(
         proxy.get(
-            "implementation"
+            "type",
+            proxy.get(
+                "upgradeability_type",
+                "UNKNOWN",
+            ),
         )
     )
 
-    if implementation_address:
+    implementation_address = proxy.get(
+        "implementation"
+    )
+
+    upgradeable = proxy.get(
+        "upgradeable"
+    )
+
+    # -----------------------------------------------------
+    # ERC-1167 MINIMAL PROXY
+    #
+    # ERC-1167 is a fixed minimal-proxy pattern.
+    # Its presence alone is not evidence of upgrade authority.
+    # -----------------------------------------------------
+
+    if proxy_type.upper() == "ERC-1167":
 
         _add_unique(
             warnings,
-            f"Proxy implementation: {implementation_address}",
+            "Token uses an ERC-1167 minimal proxy.",
         )
 
+        if implementation_address:
+
+            _add_unique(
+                warnings,
+                f"Proxy implementation: {implementation_address}",
+            )
+
+        # Do not assign a risk penalty merely because
+        # the token uses a standard minimal-proxy pattern.
+        return 0
+
     # -----------------------------------------------------
-    # A proxy is complexity, not proof of maliciousness.
+    # UNKNOWN PROXY TYPE
     # -----------------------------------------------------
 
-    if implementation.get(
-        "verified"
-    ) is True:
+    if upgradeable is None:
 
-        return 2
+        _add_unique(
+            warnings,
+            f"Proxy type: {proxy_type}. Upgradeability could not be fully determined.",
+        )
 
-    return 3
+        if implementation.get(
+            "verified"
+        ) is True:
+
+            return 2
+
+        return 4
+
+    # -----------------------------------------------------
+    # NON-UPGRADEABLE PROXY
+    # -----------------------------------------------------
+
+    if upgradeable is False:
+
+        _add_unique(
+            warnings,
+            f"Token uses a non-upgradeable {proxy_type} proxy.",
+        )
+
+        if implementation_address:
+
+            _add_unique(
+                warnings,
+                f"Proxy implementation: {implementation_address}",
+            )
+
+        return 0
+
+    # -----------------------------------------------------
+    # UPGRADEABLE PROXY
+    # -----------------------------------------------------
+
+    if upgradeable is True:
+
+        _add_unique(
+            warnings,
+            f"Token uses an upgradeable {proxy_type} proxy.",
+        )
+
+        if implementation_address:
+
+            _add_unique(
+                warnings,
+                f"Proxy implementation: {implementation_address}",
+            )
+
+        if implementation.get(
+            "verified"
+        ) is True:
+
+            return 3
+
+        return 6
+
+    return 0
+
+
+def _admin_control_penalty(audit, warnings):
+    audit = _safe_dict(audit)
+    if not audit:
+        return 0
+
+    controls = _safe_dict(audit.get("controls"))
+    detected_count = sum(len(value) for value in controls.values() if isinstance(value, list))
+    role_count = len(_safe_list(audit.get("role_functions")))
+    upgrade_functions = _safe_list(audit.get("upgrade_functions"))
+    upgradeable = audit.get("proxy_upgradeable") is True
+    owner_active = audit.get("owner_active") is True
+    address_check = _safe_dict(audit.get("address_check"))
+    address_blocked = address_check.get("blocked") is True
+
+    if not (detected_count or role_count or upgrade_functions or upgradeable or address_blocked):
+        return 0
+
+    for warning in _safe_list(audit.get("warnings")):
+        _add_unique(warnings, str(warning))
+
+    # ABI/selector names indicate a review surface, not proof that an owner
+    # can call the function. Keep the standalone signal penalty modest.
+    penalty = 2 if (detected_count or role_count) else 0
+    if owner_active and detected_count:
+        _add_unique(warnings, "A non-zero owner and recognized control functions exist; caller permissions were not verified.")
+    if upgradeable:
+        penalty += 8
+        _add_unique(warnings, "Upgradeable proxy control can change contract behavior after this scan.")
+    if role_count:
+        penalty += 3
+    if address_blocked:
+        penalty += 30
+        _add_unique(warnings, "The supplied wallet address is currently reported as blacklisted by the token.")
+    return min(penalty, 35)
+
+
+def _identity_penalty(identity, warnings):
+    identity = _safe_dict(identity)
+    if not identity:
+        return 0
+
+    penalty = 0
+    for field in ("name_comparison", "symbol_comparison"):
+        comparison = _safe_dict(identity.get(field))
+        status = _status(comparison.get("status"))
+        if status == "MISMATCH":
+            penalty += 8
+            _add_unique(warnings, f"Token {field.removesuffix('_comparison')} does not match the supplied expected identity.")
+        elif status in ("LOOKALIKE_REVIEW", "UNICODE_VARIANT_REVIEW"):
+            penalty += 10
+            _add_unique(warnings, f"Token {field.removesuffix('_comparison')} may be a visual or Unicode lookalike of the supplied expected identity.")
+    return min(penalty, 18)
 
 
 # =========================================================
@@ -1591,6 +1892,29 @@ def calculate_overall_risk(
             ),
         )
 
+    # Merge the authoritative distribution metadata with the calculated
+    # holder-risk summary. Previously only the raw distribution reached the
+    # score engine, so its HIGH concentration level was silently lost.
+    holder_distribution = dict(_safe_dict(holders))
+    holder_summary = _safe_dict(holder_risk)
+    for key in (
+        "level", "risk", "largest_wallet", "top5", "top10",
+        "coverage", "verified", "reasons",
+    ):
+        if key in holder_summary:
+            holder_distribution[key] = holder_summary[key]
+    if "risk" not in holder_distribution and "level" in holder_distribution:
+        holder_distribution["risk"] = holder_distribution["level"]
+    if "_verified" not in holder_distribution:
+        holder_distribution["_verified"] = bool(
+            holder_distribution.get("verified", False)
+        )
+    if "_complete" not in holder_distribution:
+        holder_distribution["_complete"] = (
+            _status(holder_distribution.get("coverage")) == "COMPLETE"
+        )
+    holders = holder_distribution
+
     # =====================================================
     # PENALTIES
     # =====================================================
@@ -1682,6 +2006,58 @@ def calculate_overall_risk(
 
     penalty += trade_safety_penalty
 
+    # -----------------------------------------------------
+    # Cross-engine trading control evidence
+    # -----------------------------------------------------
+
+    trading_control_evidence = 0
+
+    if (
+        isinstance(trading_limits, dict)
+        and isinstance(ownership, dict)
+    ):
+
+        trading_signals = (
+            trading_limits.get(
+                "signals",
+                [],
+            )
+        )
+
+        owner = ownership.get(
+            "owner"
+        )
+
+        ownership_renounced = bool(
+            ownership.get(
+                "ownership_renounced",
+                False,
+            )
+        )
+
+        active_trading_admin = any(
+            "admin-controlled" in str(signal).lower()
+            for signal in trading_signals
+        )
+
+        if active_trading_admin and owner and not ownership_renounced:
+
+            trading_control_evidence = 10
+
+            penalty += trading_control_evidence
+
+            penalty_breakdown[
+                "Evidence: Privileged trading control"
+            ] = trading_control_evidence
+
+            warning = (
+                "Privileged ownership and admin-controlled "
+                "trading restrictions were detected together."
+            )
+
+            if warning not in warnings:
+                warnings.append(warning)
+
     simulation_penalty = _simulation_penalty(
         trade_simulation,
         warnings,
@@ -1727,6 +2103,20 @@ def calculate_overall_risk(
 
     penalty += proxy_penalty
 
+    admin_control_penalty = _admin_control_penalty(
+        kwargs.get("admin_control_audit"),
+        warnings,
+    )
+    penalty_breakdown["Admin control surface"] = admin_control_penalty
+    penalty += admin_control_penalty
+
+    identity_penalty = _identity_penalty(
+        kwargs.get("token_identity"),
+        warnings,
+    )
+    penalty_breakdown["Identity comparison"] = identity_penalty
+    penalty += identity_penalty
+
     # =====================================================
     # EVIDENCE-BASED RISK FLOORS
     # =====================================================
@@ -1755,19 +2145,13 @@ def calculate_overall_risk(
         )
 
     if (
-        liquidity_found is False
-        or (
-            isinstance(
-                liquidity,
-                dict,
+        not _liquidity_unavailable(liquidity)
+        and (
+            liquidity_found is False
+            or (
+                isinstance(liquidity, dict)
+                and str(liquidity.get("risk", "")).upper() == "NONE"
             )
-            and str(
-                liquidity.get(
-                    "risk",
-                    "",
-                )
-            ).upper()
-            == "NONE"
         )
     ):
 
@@ -1892,6 +2276,7 @@ def calculate_overall_risk(
             coverage == "COMPLETE"
             and largest_wallet is not None
             and largest_wallet >= 50
+            and holder_penalty == 0
         ):
 
             penalty += 30
@@ -1989,6 +2374,25 @@ def calculate_overall_risk(
 
         risk = "LOW"
 
+    evidence_assessment = _evidence_assessment(
+        security=security,
+        liquidity=liquidity,
+        lp_safety=lp_safety,
+        trade_simulation=trade_simulation,
+        swap_simulation=swap_simulation,
+        honeypot=honeypot,
+        ownership=ownership,
+        warnings=warnings,
+        abi_available=kwargs.get("abi_available"),
+    )
+
+    if risk in ("CRITICAL", "HIGH"):
+        guidance = "AVOID_BUYING_UNTIL_RISKS_ARE_RESOLVED"
+    elif evidence_assessment["status"] in ("INCONCLUSIVE", "LIMITED"):
+        guidance = "DO_NOT_TREAT_AS_SAFE"
+    else:
+        guidance = "REVIEW_EVIDENCE_BEFORE_DECIDING"
+
     # =====================================================
     # POSITIVE SIGNALS
     # =====================================================
@@ -2009,7 +2413,17 @@ def calculate_overall_risk(
 
     return {
         "score": score,
-        "risk": risk,
+        "risk": (
+            evidence_assessment["status"]
+            if evidence_assessment["status"] != "ASSESSED"
+            else risk
+        ),
+        "score_band": risk,
+        "assessment": evidence_assessment["status"],
+        "coverage_confidence": evidence_assessment["coverage_confidence"],
+        "unresolved_checks": evidence_assessment["unresolved_checks"],
+        "beginner_guidance": guidance,
+        "score_meaning": "Severity points from detected evidence; not scam probability and not a trade block.",
         "breakdown": penalty_breakdown,
         "warnings": warnings,
         "positive_signals": positives,

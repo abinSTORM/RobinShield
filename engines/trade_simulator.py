@@ -863,6 +863,7 @@ def run_multi_size_analysis(
     quote_token,
     token_decimals,
     quote_decimals,
+    existing_tests=None,
 ):
 
     test_amounts = [
@@ -872,16 +873,18 @@ def run_multi_size_analysis(
     ]
 
     tests = []
+    existing_tests = existing_tests or {}
 
     for amount in test_amounts:
-
-        test = analyze_round_trip(
-            token_address,
-            quote_token,
-            amount,
-            token_decimals,
-            quote_decimals,
-        )
+        test = existing_tests.get(amount)
+        if test is None:
+            test = analyze_round_trip(
+                token_address,
+                quote_token,
+                amount,
+                token_decimals,
+                quote_decimals,
+            )
 
         tests.append(
             test
@@ -1084,6 +1087,7 @@ def analyze_trade_simulation(
             quote_token,
             token_decimals,
             quote_decimals,
+            existing_tests={"0.001": primary_test},
         )
     )
 

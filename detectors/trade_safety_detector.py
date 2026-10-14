@@ -227,18 +227,27 @@ def analyze_trade_safety(
     # TRADING CONTROLS
     # ==================================================
 
-    trading_terms = [
+    # Read-only status getters describe state; they do not change it.
+    trading_state_getters = {
         "tradingenabled",
-        "enabletrading",
-        "disabletrading",
         "tradingopen",
+        "istradingenabled",
+        "istradingopen",
         "tradingactive",
         "tradingstatus",
         "tradingstate",
-        "opentrading",
+    }
+    trading_getters_found = sorted(
+        name for name in function_names
+        if name.lower() in trading_state_getters
+    )
+
+    trading_terms = [
+        "enabletrading",
+        "disabletrading",
         "closetrading",
+        "stoptrading",
         "settrading",
-        "settradingenabled",
     ]
 
     trading_found = _find_functions(
@@ -253,6 +262,24 @@ def analyze_trade_safety(
             + ", ".join(
                 trading_found
             )
+        )
+
+    if trading_getters_found:
+        signals.append(
+            "Read-only trading-state getter(s) detected: "
+            + ", ".join(trading_getters_found)
+            + ". A getter does not itself enable or disable trading."
+        )
+
+    launch_functions_found = _find_functions(
+        function_names,
+        ["starttrading", "opentrading", "enabletrading", "launch"],
+    )
+    if launch_functions_found:
+        signals.append(
+            "Launch/start function(s) detected: "
+            + ", ".join(launch_functions_found)
+            + ". This does not by itself show that trading can later be disabled."
         )
 
     # ==================================================
@@ -388,27 +415,46 @@ def analyze_trade_safety(
     # DYNAMIC TAX / FEE SETTERS
     # ==================================================
 
-    tax_setter_terms = [
-        "settax",
-        "setfee",
-        "updatetax",
-        "updatefee",
-        "changetax",
-        "changefee",
-        "setbuytax",
-        "setselltax",
-        "settaxrate",
-        "setfeerate",
-        "setbuyfee",
-        "setsellfee",
-        "setmarketingfee",
-        "setliquidityfee",
-    ]
-
-    tax_setter_found = _find_functions(
-        function_names,
-        tax_setter_terms,
+    # Match rate/amount setters by exact normalized name. Substring matching
+    # incorrectly classified setTaxWallet/setFeeReceiver as tax-rate setters.
+    tax_rate_setters = {
+        "settax", "settaxes", "settaxrate", "settaxesrate",
+        "settaxrates", "settaxpercent", "updatetax", "updatetaxes",
+        "updatetaxrates", "changetax", "setbuytax", "setselltax",
+        "setbuytaxrate", "setselltaxrate", "updatebuytax", "updateselltax",
+        "setfee", "setfees", "setfeerate", "setfeepercent",
+        "updatefee", "updatefees", "changefee", "changefees",
+        "setbuyfee", "setsellfee", "setbuyfeerate", "setsellfeerate",
+        "setbuytotalfees", "setselltotalfees", "settotalfees",
+        "setmarketingfee", "setliquidityfee", "setdevelopmentfee", "setdevfee",
+    }
+    tax_setter_found = sorted(
+        name for name in function_names
+        if name.lower() in tax_rate_setters
     )
+
+    fee_destination_setters = _find_functions(
+        function_names,
+        ["settaxwallet", "setfeewallet", "setfeereceiver", "settaxrecipient"],
+    )
+    fee_distribution_setters = _find_functions(
+        function_names,
+        ["setrewardpoolfee"],
+    )
+
+    if fee_destination_setters:
+        signals.append(
+            "Fee/tax recipient configuration function(s) detected: "
+            + ", ".join(fee_destination_setters)
+            + ". These names do not by themselves indicate that buy/sell tax rates can change."
+        )
+
+    if fee_distribution_setters:
+        signals.append(
+            "Fee-distribution configuration function(s) detected: "
+            + ", ".join(fee_distribution_setters)
+            + ". The effect on transfer fees is not established from the name alone."
+        )
 
     if tax_setter_found:
 

@@ -53,8 +53,10 @@ BALANCE_BATCH_SIZE = 50
 # RPC fallback
 # ---------------------------------------------------------
 
-RPC_CHUNK_SIZE = 5000
-RPC_MIN_CHUNK_SIZE = 100
+RPC_CHUNK_SIZE = 20_000
+RPC_MIN_CHUNK_SIZE = 250
+RPC_WORKERS = 8
+RPC_PROGRESS_BLOCKS = 500_000
 
 # ---------------------------------------------------------
 # Cache
@@ -471,6 +473,81 @@ def _save_cache(
         address
     )
 
+    metadata = (
+        metadata
+        if isinstance(
+            metadata,
+            dict,
+        )
+        else {}
+    )
+
+    incoming_is_authoritative = (
+        source == "rpc_transfer_logs"
+        and bool(verified)
+        and bool(
+            metadata.get(
+                "complete"
+            )
+        )
+    )
+
+    # A normal scan can discover useful but partial holder data.
+    # Do not let it overwrite a completed deep RPC reconstruction.
+    try:
+
+        with open(
+            path,
+            "r",
+            encoding="utf-8",
+        ) as file:
+
+            existing = json.load(
+                file
+            )
+
+        existing_metadata = existing.get(
+            "metadata",
+            {},
+        )
+
+        if not isinstance(
+            existing_metadata,
+            dict,
+        ):
+
+            existing_metadata = {}
+
+        existing_is_authoritative = (
+            existing.get(
+                "cache_version"
+            ) == CACHE_VERSION
+            and existing.get(
+                "source"
+            ) == "rpc_transfer_logs"
+            and bool(
+                existing.get(
+                    "verified"
+                )
+            )
+            and bool(
+                existing_metadata.get(
+                    "complete"
+                )
+            )
+        )
+
+        if (
+            existing_is_authoritative
+            and not incoming_is_authoritative
+        ):
+
+            return
+
+    except Exception:
+
+        pass
+
     payload = {
         "cache_version": CACHE_VERSION,
         "token": str(
@@ -483,14 +560,7 @@ def _save_cache(
         "verified": bool(
             verified
         ),
-        "metadata": (
-            metadata
-            if isinstance(
-                metadata,
-                dict,
-            )
-            else {}
-        ),
+        "metadata": metadata,
         "holders": normalized,
     }
 
@@ -614,6 +684,10 @@ def _load_cache(
         ):
 
             metadata = {}
+
+        holders[
+            "_cache_metadata"
+        ] = metadata
 
         holders[
             "_complete"
@@ -1683,81 +1757,307 @@ def _get_transfer_logs(
     from_block,
     to_block,
 ):
+    """
+    Retrieve ERC-20 Transfer logs over a large historical range.
 
-    logs = []
+    The Robinhood RPC is reliable for smaller ranges but may become
+    slow or timeout on large eth_getLogs requests. We therefore:
 
-    current = int(
-        from_block
+        1. Split the history into safe chunks.
+        2. Process multiple chunks concurrently.
+        3. Retry failed chunks by splitting them into smaller ranges.
+        4. Print progress during deep scans.
+
+    Returned logs are combined without changing their contents.
+    """
+
+    from concurrent.futures import (
+        ThreadPoolExecutor,
+        as_completed,
     )
 
-    end = int(
-        to_block
-    )
+    start_block = int(from_block)
+    end_block = int(to_block)
 
-    chunk_size = RPC_CHUNK_SIZE
+    if start_block > end_block:
+        return []
 
-    while current <= end:
+    rpc_url = RPC_URL
 
-        chunk_end = min(
-            current
-            + chunk_size
-            - 1,
-            end,
-        )
+    def request_range(
+        range_start,
+        range_end,
+        depth=0,
+    ):
+        """
+        Request one range.
+
+        If the RPC rejects or times out on a large range,
+        split it recursively until it succeeds or reaches
+        RPC_MIN_CHUNK_SIZE.
+        """
+
+        payload = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "eth_getLogs",
+            "params": [
+                {
+                    "address": _safe_checksum(
+                        token_address
+                    ),
+                    "topics": [
+                        TRANSFER_TOPIC
+                    ],
+                    "fromBlock": hex(
+                        range_start
+                    ),
+                    "toBlock": hex(
+                        range_end
+                    ),
+                }
+            ],
+        }
 
         try:
+            response = requests.post(
+                rpc_url,
+                json=payload,
+                timeout=REQUEST_TIMEOUT,
+                headers={
+                    "Accept": "application/json",
+                    "Content-Type": "application/json",
+                    "User-Agent": "RobinShield/1.0",
+                },
+            )
 
-            chunk = _rpc_request(
-                w3,
-                "eth_getLogs",
-                [
-                    {
-                        "address": _safe_checksum(
-                            token_address
-                        ),
-                        "topics": [
-                            TRANSFER_TOPIC
-                        ],
-                        "fromBlock": hex(
-                            current
-                        ),
-                        "toBlock": hex(
-                            chunk_end
-                        ),
-                    }
-                ],
+            if response.status_code != 200:
+                raise RuntimeError(
+                    f"HTTP {response.status_code}"
+                )
+
+            data = response.json()
+
+            if not isinstance(
+                data,
+                dict,
+            ):
+                raise RuntimeError(
+                    "Invalid JSON-RPC response."
+                )
+
+            if data.get("error"):
+                raise RuntimeError(
+                    str(
+                        data["error"]
+                    )
+                )
+
+            result = data.get(
+                "result",
+                [],
             )
 
             if not isinstance(
-                chunk,
+                result,
                 list,
             ):
-
                 raise RuntimeError(
                     "Invalid eth_getLogs result."
                 )
 
-            logs.extend(
-                chunk
-            )
+            return result
 
-            current = (
-                chunk_end
+        except Exception as exc:
+
+            span = (
+                range_end
+                - range_start
                 + 1
             )
 
-        except Exception:
+            if span <= RPC_MIN_CHUNK_SIZE:
+                raise RuntimeError(
+                    "eth_getLogs failed for "
+                    f"{range_start}-{range_end}: {exc}"
+                )
 
-            if chunk_size <= RPC_MIN_CHUNK_SIZE:
+            midpoint = (
+                range_start
+                + range_end
+            ) // 2
 
-                raise
-
-            chunk_size = max(
-                RPC_MIN_CHUNK_SIZE,
-                chunk_size // 2,
+            left = request_range(
+                range_start,
+                midpoint,
+                depth=depth + 1,
             )
 
-    return logs
+            right = request_range(
+                midpoint + 1,
+                range_end,
+                depth=depth + 1,
+            )
+
+            return left + right
+
+    # -----------------------------------------------------
+    # Create safe ranges
+    # -----------------------------------------------------
+
+    ranges = []
+
+    current = start_block
+
+    while current <= end_block:
+
+        chunk_end = min(
+            current
+            + RPC_CHUNK_SIZE
+            - 1,
+            end_block,
+        )
+
+        ranges.append(
+            (
+                current,
+                chunk_end,
+            )
+        )
+
+        current = (
+            chunk_end
+            + 1
+        )
+
+    total_ranges = len(
+        ranges
+    )
+
+    print(
+        "[Holder RPC] "
+        f"Scanning {start_block:,} -> {end_block:,} "
+        f"({end_block - start_block + 1:,} blocks)"
+    )
+
+    print(
+        "[Holder RPC] "
+        f"Chunks: {total_ranges:,} "
+        f"| Workers: {RPC_WORKERS}"
+    )
+
+    completed_ranges = 0
+    scanned_blocks = 0
+    all_logs = []
+
+    # -----------------------------------------------------
+    # Process chunks concurrently
+    # -----------------------------------------------------
+
+    with ThreadPoolExecutor(
+        max_workers=RPC_WORKERS
+    ) as executor:
+
+        future_map = {
+            executor.submit(
+                request_range,
+                range_start,
+                range_end,
+            ): (
+                range_start,
+                range_end,
+            )
+            for range_start, range_end
+            in ranges
+        }
+
+        for future in as_completed(
+            future_map
+        ):
+
+            range_start, range_end = (
+                future_map[
+                    future
+                ]
+            )
+
+            logs = future.result()
+
+            if logs:
+                all_logs.extend(
+                    logs
+                )
+
+            completed_ranges += 1
+
+            scanned_blocks += (
+                range_end
+                - range_start
+                + 1
+            )
+
+            if (
+                completed_ranges == 1
+                or
+                scanned_blocks
+                % RPC_PROGRESS_BLOCKS
+                < RPC_CHUNK_SIZE
+                or
+                completed_ranges
+                == total_ranges
+            ):
+
+                percent = (
+                    scanned_blocks
+                    / (
+                        end_block
+                        - start_block
+                        + 1
+                    )
+                ) * 100
+
+                print(
+                    "[Holder RPC] "
+                    f"{percent:6.2f}% | "
+                    f"{completed_ranges:,}/{total_ranges:,} "
+                    "chunks | "
+                    f"logs: {len(all_logs):,}"
+                )
+
+    # -----------------------------------------------------
+    # Keep chain order stable.
+    # -----------------------------------------------------
+
+    all_logs.sort(
+        key=lambda log: (
+            _safe_int(
+                log.get(
+                    "blockNumber",
+                    "0x0",
+                )
+            ),
+            _safe_int(
+                log.get(
+                    "transactionIndex",
+                    "0x0",
+                )
+            ),
+            _safe_int(
+                log.get(
+                    "logIndex",
+                    "0x0",
+                )
+            ),
+        )
+    )
+
+    print(
+        "[Holder RPC] "
+        f"Completed. Transfer logs: "
+        f"{len(all_logs):,}"
+    )
+
+    return all_logs
 
 
 def _get_rpc_holders(
@@ -1770,27 +2070,220 @@ def _get_rpc_holders(
         w3.eth.block_number
     )
 
+    checksum = Web3.to_checksum_address(
+        address
+    )
+
+    # -----------------------------------------------------
+    # Find token creation block.
+    # -----------------------------------------------------
+
     creation = _find_creation_block(
         w3,
-        address,
+        checksum,
     )
 
     if creation is None:
 
         return None
 
-    logs = _get_transfer_logs(
-        w3,
-        address,
-        creation,
-        latest,
+    # -----------------------------------------------------
+    # Load previous authoritative RPC snapshot.
+    # -----------------------------------------------------
+
+    cached = _load_cache(
+        checksum
     )
 
-    if not logs:
+    cached_metadata = {}
 
-        return None
+    if cached:
+
+        cached_metadata = cached.get(
+            "_cache_metadata",
+            {}
+        )
+
+        if not isinstance(
+            cached_metadata,
+            dict,
+        ):
+
+            cached_metadata = {}
+
+    cached_source = str(
+        cached.get(
+            "_source",
+            "",
+        )
+        if cached
+        else ""
+    ).lower()
+
+    cached_verified = bool(
+        cached.get(
+            "_verified",
+            False,
+        )
+        if cached
+        else False
+    )
+
+    cached_complete = bool(
+        cached.get(
+            "_complete",
+            False,
+        )
+        if cached
+        else False
+    )
+
+    cached_latest = cached_metadata.get(
+        "latest_block"
+    )
+
+    try:
+
+        if cached_latest is not None:
+
+            cached_latest = int(
+                cached_latest
+            )
+
+    except Exception:
+
+        cached_latest = None
+
+    # -----------------------------------------------------
+    # Restore cached balances when the snapshot is an
+    # authoritative completed RPC reconstruction.
+    # -----------------------------------------------------
+
+    use_incremental_cache = (
+        cached
+        and cached_source == "rpc_transfer_logs"
+        and cached_verified
+        and cached_complete
+        and cached_latest is not None
+        and cached_latest >= creation
+    )
 
     balances = {}
+
+    if use_incremental_cache:
+
+        for holder in cached.get(
+            "items",
+            [],
+        ):
+
+            if not isinstance(
+                holder,
+                dict,
+            ):
+                continue
+
+            address_info = holder.get(
+                "address",
+                {}
+            )
+
+            if not isinstance(
+                address_info,
+                dict,
+            ):
+                continue
+
+            holder_address = address_info.get(
+                "hash"
+            )
+
+            if not holder_address:
+                continue
+
+            try:
+
+                holder_address = (
+                    Web3.to_checksum_address(
+                        holder_address
+                    )
+                )
+
+            except Exception:
+
+                continue
+
+            value = _safe_int(
+                holder.get(
+                    "value",
+                    0,
+                )
+            )
+
+            if value > 0:
+
+                balances[
+                    holder_address
+                ] = value
+
+        start_block = max(
+            creation,
+            cached_latest + 1,
+        )
+
+        print(
+            "[Holder RPC] "
+            f"Using cached snapshot from block "
+            f"{cached_latest:,}."
+        )
+
+        if start_block <= latest:
+
+            print(
+                "[Holder RPC] "
+                f"Incremental scan: "
+                f"{start_block:,} → {latest:,}"
+            )
+
+        else:
+
+            print(
+                "[Holder RPC] "
+                "Cache is already current."
+            )
+
+    else:
+
+        start_block = creation
+
+        print(
+            "[Holder RPC] "
+            f"Full scan: "
+            f"{creation:,} → {latest:,}"
+        )
+
+    # -----------------------------------------------------
+    # Fetch new transfer logs.
+    # -----------------------------------------------------
+
+    logs = []
+
+    if start_block <= latest:
+
+        logs = _get_transfer_logs(
+            w3,
+            checksum,
+            start_block,
+            latest,
+        )
+
+        if not logs:
+
+            logs = []
+
+    # -----------------------------------------------------
+    # Apply transfer events.
+    # -----------------------------------------------------
 
     for log in logs:
 
@@ -1798,7 +2291,6 @@ def _get_rpc_holders(
             log,
             dict,
         ):
-
             continue
 
         topics = log.get(
@@ -1810,11 +2302,9 @@ def _get_rpc_holders(
             topics,
             list,
         ):
-
             continue
 
         if len(topics) < 3:
-
             continue
 
         from_address = (
@@ -1837,18 +2327,15 @@ def _get_rpc_holders(
         )
 
         if amount <= 0:
-
             continue
 
         if from_address:
 
-            key = _safe_lower(
+            balances[
                 from_address
-            )
-
-            balances[key] = (
+            ] = (
                 balances.get(
-                    key,
+                    from_address,
                     0,
                 )
                 - amount
@@ -1856,46 +2343,63 @@ def _get_rpc_holders(
 
         if to_address:
 
-            key = _safe_lower(
+            balances[
                 to_address
-            )
-
-            balances[key] = (
+            ] = (
                 balances.get(
-                    key,
+                    to_address,
                     0,
                 )
                 + amount
             )
 
+    # -----------------------------------------------------
+    # Remove zero / negative balances.
+    # -----------------------------------------------------
+
     balances = {
-        address: balance
-        for address, balance in balances.items()
+        holder_address: balance
+        for holder_address, balance in balances.items()
         if balance > 0
     }
+
+    # -----------------------------------------------------
+    # Verify reconstructed balances against totalSupply.
+    # -----------------------------------------------------
+
+    total_supply = _get_total_supply(
+        w3,
+        checksum,
+    )
+
+    if total_supply is None:
+
+        return None
+
+    reconstructed_total = sum(
+        balances.values()
+    )
+
+    if reconstructed_total != total_supply:
+
+        print(
+            "[Holder RPC] "
+            "Reconstruction verification FAILED: "
+            f"balances={reconstructed_total:,}, "
+            f"totalSupply={total_supply:,}"
+        )
+
+        return None
+
+    # -----------------------------------------------------
+    # Convert balances into holder data.
+    # -----------------------------------------------------
 
     holders = _balances_to_holder_data(
         balances
     )
 
     if not holders:
-
-        return None
-
-    total_supply = _get_total_supply(
-        w3,
-        address,
-    )
-
-    reconstructed_total = _holder_total(
-        holders
-    )
-
-    if (
-        total_supply <= 0
-        or reconstructed_total
-        != total_supply
-    ):
 
         return None
 
@@ -1912,13 +2416,12 @@ def _get_rpc_holders(
     ] = True
 
     holders[
-        "_candidate_count"
-    ] = len(
-        holders.get(
-            "items",
-            []
-        )
-    )
+        "_coverage"
+    ] = "COMPLETE"
+
+    holders[
+        "_deep"
+    ] = True
 
     holders[
         "_holder_count"
@@ -1929,14 +2432,26 @@ def _get_rpc_holders(
         )
     )
 
+    # -----------------------------------------------------
+    # Save updated authoritative snapshot.
+    # -----------------------------------------------------
+
     _save_cache(
-        address,
+        checksum,
         holders,
         source="rpc_transfer_logs",
         verified=True,
         metadata={
             "creation_block": creation,
             "latest_block": latest,
+            "previous_latest_block": (
+                cached_latest
+                if use_incremental_cache
+                else None
+            ),
+            "incremental": bool(
+                use_incremental_cache
+            ),
             "transfer_count": len(
                 logs
             ),
@@ -2079,17 +2594,50 @@ def get_holders(
     address,
     deep=False,
 ):
-
     checksum = _safe_checksum(
         address
     )
 
     if not checksum:
-
         return None
 
     # -----------------------------------------------------
-    # 1. Direct Blockscout
+    # 1. Deep mode: authoritative RPC reconstruction
+    #
+    # Rebuild balances from the complete Transfer history
+    # and verify the reconstructed total against totalSupply.
+    # This is the strongest holder source available to
+    # RobinShield when the private RPC supports historical logs.
+    # -----------------------------------------------------
+
+    if deep:
+        try:
+            print(
+                "\n[Holder RPC] Deep mode: starting authoritative holder reconstruction..."
+            )
+
+            holders = _get_rpc_holders(
+                checksum
+            )
+
+            if holders:
+                print(
+                    "[Holder RPC] Deep reconstruction succeeded."
+                )
+                return holders
+
+            print(
+                "[Holder RPC] Deep reconstruction returned no holder data."
+            )
+
+        except Exception as exc:
+            print(
+                f"[Holder RPC] Deep reconstruction FAILED: "
+                f"{type(exc).__name__}: {exc}"
+            )
+
+    # -----------------------------------------------------
+    # 2. Direct Blockscout
     # -----------------------------------------------------
 
     holders = _get_blockscout_holders(
@@ -2098,24 +2646,26 @@ def get_holders(
 
     if holders:
 
+        # Do not automatically assume Blockscout's first
+        # response represents the complete holder set.
         holders[
             "_source"
         ] = "blockscout"
 
         holders[
             "_verified"
-        ] = True
+        ] = False
 
         holders[
             "_complete"
-        ] = True
+        ] = False
 
         holders[
             "_candidate_count"
         ] = len(
             holders.get(
                 "items",
-                []
+                [],
             )
         )
 
@@ -2124,36 +2674,74 @@ def get_holders(
         ] = len(
             holders.get(
                 "items",
-                []
+                [],
             )
         )
 
-        _save_cache(
-            checksum,
-            holders,
-            source="blockscout",
-            verified=True,
-            metadata={
-                "complete": True,
-                "candidate_count": len(
-                    holders.get(
-                        "items",
-                        []
-                    )
-                ),
-                "holder_count": len(
-                    holders.get(
-                        "items",
-                        []
-                    )
-                ),
-            },
-        )
+        # Try to establish whether the returned balances
+        # actually reconcile with totalSupply.
+        try:
+            w3 = _get_web3()
+
+            total_supply = _get_total_supply(
+                w3,
+                checksum,
+            )
+
+            discovered_total = _holder_total(
+                holders
+            )
+
+            if (
+                total_supply > 0
+                and discovered_total == total_supply
+            ):
+                holders[
+                    "_verified"
+                ] = True
+
+                holders[
+                    "_complete"
+                ] = True
+
+                _save_cache(
+                    checksum,
+                    holders,
+                    source="blockscout",
+                    verified=True,
+                    metadata={
+                        "complete": True,
+                        "candidate_count": len(
+                            holders.get(
+                                "items",
+                                [],
+                            )
+                        ),
+                        "holder_count": len(
+                            holders.get(
+                                "items",
+                                [],
+                            )
+                        ),
+                        "discovered_total": discovered_total,
+                        "total_supply": total_supply,
+                    },
+                )
+
+                return holders
+
+        except Exception:
+            pass
+
+        # Return as partial rather than falsely verified.
+        holders[
+            "_source"
+        ] = "blockscout_partial"
 
         return holders
 
     # -----------------------------------------------------
-    # 2. Blockscout PRO
+    # 3. Blockscout PRO
     # -----------------------------------------------------
 
     holders = _get_blockscout_pro_holders(
@@ -2168,18 +2756,18 @@ def get_holders(
 
         holders[
             "_verified"
-        ] = True
+        ] = False
 
         holders[
             "_complete"
-        ] = True
+        ] = False
 
         holders[
             "_candidate_count"
         ] = len(
             holders.get(
                 "items",
-                []
+                [],
             )
         )
 
@@ -2188,36 +2776,71 @@ def get_holders(
         ] = len(
             holders.get(
                 "items",
-                []
+                [],
             )
         )
 
-        _save_cache(
-            checksum,
-            holders,
-            source="blockscout_pro",
-            verified=True,
-            metadata={
-                "complete": True,
-                "candidate_count": len(
-                    holders.get(
-                        "items",
-                        []
-                    )
-                ),
-                "holder_count": len(
-                    holders.get(
-                        "items",
-                        []
-                    )
-                ),
-            },
-        )
+        try:
+            w3 = _get_web3()
+
+            total_supply = _get_total_supply(
+                w3,
+                checksum,
+            )
+
+            discovered_total = _holder_total(
+                holders
+            )
+
+            if (
+                total_supply > 0
+                and discovered_total == total_supply
+            ):
+                holders[
+                    "_verified"
+                ] = True
+
+                holders[
+                    "_complete"
+                ] = True
+
+                _save_cache(
+                    checksum,
+                    holders,
+                    source="blockscout_pro",
+                    verified=True,
+                    metadata={
+                        "complete": True,
+                        "candidate_count": len(
+                            holders.get(
+                                "items",
+                                [],
+                            )
+                        ),
+                        "holder_count": len(
+                            holders.get(
+                                "items",
+                                [],
+                            )
+                        ),
+                        "discovered_total": discovered_total,
+                        "total_supply": total_supply,
+                    },
+                )
+
+                return holders
+
+        except Exception:
+            pass
+
+        holders[
+            "_source"
+        ] = "blockscout_pro_partial"
 
         return holders
 
     # -----------------------------------------------------
-    # 3. Alchemy
+    # 4. Alchemy
     # -----------------------------------------------------
 
     holders = _get_alchemy_holders(
@@ -2226,11 +2849,10 @@ def get_holders(
     )
 
     if holders:
-
         return holders
 
     # -----------------------------------------------------
-    # 4. Verified cache
+    # 5. Verified cache
     # -----------------------------------------------------
 
     cached = _load_cache(
@@ -2238,25 +2860,24 @@ def get_holders(
     )
 
     if cached:
-
         return cached
 
     # -----------------------------------------------------
-    # 5. Complete RPC reconstruction
+    # 6. Complete RPC reconstruction
+    #
+    # Normal mode reaches this only when the faster sources
+    # did not return usable data.
     # -----------------------------------------------------
 
     try:
-
         holders = _get_rpc_holders(
             checksum
         )
 
         if holders:
-
             return holders
 
     except Exception:
-
         pass
 
     return None
@@ -2818,42 +3439,143 @@ def get_holder_risk(
 
         w3 = None
 
+    addresses = []
+
     for holder in valid:
 
         address = _get_holder_address(
             holder
         )
 
-        if not address:
+        if address:
 
-            continue
-
-        if w3 is None:
-
-            continue
-
-        try:
-
-            code = w3.eth.get_code(
-                Web3.to_checksum_address(
-                    address
-                )
+            addresses.append(
+                address
             )
 
-            if code and code not in (
-                b"",
-                b"\x00",
-            ):
+    if w3 is not None:
 
-                contract_count += 1
+        provider = getattr(
+            w3,
+            "provider",
+            None,
+        )
 
-            else:
+        batch_method = getattr(
+            provider,
+            "make_batch_request",
+            None,
+        )
 
-                eoa_count += 1
+        for start in range(
+            0,
+            len(addresses),
+            BALANCE_BATCH_SIZE,
+        ):
 
-        except Exception:
+            batch_addresses = addresses[
+                start:start + BALANCE_BATCH_SIZE
+            ]
 
-            unknown_count += 1
+            batch_requests = []
+
+            try:
+
+                if not callable(
+                    batch_method
+                ):
+
+                    raise RuntimeError(
+                        "The RPC provider does not support batch requests."
+                    )
+
+                batch_requests = [
+                    (
+                        "eth_getCode",
+                        [
+                            Web3.to_checksum_address(
+                                address
+                            ),
+                            "latest",
+                        ],
+                    )
+                    for address in batch_addresses
+                ]
+
+                responses = batch_method(
+                    batch_requests
+                )
+
+                if not isinstance(
+                    responses,
+                    list,
+                ) or len(responses) != len(
+                    batch_addresses
+                ):
+
+                    raise RuntimeError(
+                        "The RPC provider returned an invalid batch response."
+                    )
+
+                for response in responses:
+
+                    if not isinstance(
+                        response,
+                        dict,
+                    ) or response.get(
+                        "error"
+                    ):
+
+                        unknown_count += 1
+                        continue
+
+                    code = response.get(
+                        "result"
+                    )
+
+                    if isinstance(
+                        code,
+                        str,
+                    ) and code.lower() not in (
+                        "0x",
+                        "0x0",
+                        "0x00",
+                    ):
+
+                        contract_count += 1
+
+                    else:
+
+                        eoa_count += 1
+
+            except Exception:
+
+                # Preserve the previous per-address behavior when a provider
+                # rejects JSON-RPC batches or returns an unusable batch.
+                for address in batch_addresses:
+
+                    try:
+
+                        code = w3.eth.get_code(
+                            Web3.to_checksum_address(
+                                address
+                            )
+                        )
+
+                        if code and code not in (
+                            b"",
+                            b"\x00",
+                        ):
+
+                            contract_count += 1
+
+                        else:
+
+                            eoa_count += 1
+
+                    except Exception:
+
+                        unknown_count += 1
 
     # =====================================================
     # CONCENTRATION

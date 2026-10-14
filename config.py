@@ -1,12 +1,26 @@
+import os
+
+from dotenv import load_dotenv
+
+load_dotenv()
+
 # Robinhood Chain
-
-RPC_URL = "https://rpc.mainnet.chain.robinhood.com"
-
-BLOCKSCOUT_API = "https://robinhoodchain.blockscout.com/api/v2"
-
-BLOCKSCOUT_SMART_CONTRACT = (
-    f"{BLOCKSCOUT_API}/smart-contracts"
+RPC_URL = os.getenv(
+    "ROBINHOOD_RPC_URL",
+    "https://rpc.mainnet.chain.robinhood.com",
 )
+
+RPC_WSS_URL = os.getenv(
+    "ROBINHOOD_RPC_WSS_URL",
+    "",
+)
+
+BLOCKSCOUT_API = os.getenv(
+    "BLOCKSCOUT_API",
+    "https://robinhoodchain.blockscout.com/api/v2",
+)
+
+BLOCKSCOUT_SMART_CONTRACT = f"{BLOCKSCOUT_API}/smart-contracts"
 
 # Uniswap V2
 V2_FACTORY = "0x8bcEaA40B9AcdfAedF85AdF4FF01F5Ad6517937f"

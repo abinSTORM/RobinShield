@@ -1,6 +1,7 @@
 import requests
 
 from config import RPC_URL
+from core.bytecode_patterns import match_bytecode_patterns
 
 
 # =========================================================
@@ -299,6 +300,54 @@ ADDITIONAL_SIGNATURES = {
     "taxRate()": "taxRate()",
     "buyTotalFees()": "buyTotalFees()",
     "sellTotalFees()": "sellTotalFees()",
+    "setTax(uint256)": "setTax(uint256)",
+    "setTaxPercent(uint256)": "setTaxPercent(uint256)",
+    "setTaxRates(uint256,uint256)": "setTaxRates(uint256,uint256)",
+    "setTaxes(uint256,uint256)": "setTaxes(uint256,uint256)",
+    "setBuyTax(uint256)": "setBuyTax(uint256)",
+    "setSellTax(uint256)": "setSellTax(uint256)",
+    "setBuyTaxRate(uint256)": "setBuyTaxRate(uint256)",
+    "setSellTaxRate(uint256)": "setSellTaxRate(uint256)",
+    "updateTaxes(uint256,uint256)": "updateTaxes(uint256,uint256)",
+    "updateTaxRates(uint256,uint256)": "updateTaxRates(uint256,uint256)",
+    "setFees(uint256,uint256)": "setFees(uint256,uint256)",
+    "setFees(uint256,uint256,uint256,uint256)": "setFees(uint256,uint256,uint256,uint256)",
+    "setFee(uint256)": "setFee(uint256)",
+    "setFeePercent(uint256)": "setFeePercent(uint256)",
+    "setBuyFee(uint256)": "setBuyFee(uint256)",
+    "setSellFee(uint256)": "setSellFee(uint256)",
+    "setBlacklist(address,bool)": "setBlacklist(address,bool)",
+    "addToBlacklist(address)": "addToBlacklist(address)",
+    "removeFromBlacklist(address)": "removeFromBlacklist(address)",
+    "setBlacklisted(address,bool)": "setBlacklisted(address,bool)",
+    "setTradingEnabled(bool)": "setTradingEnabled(bool)",
+    "setTradingOpen(bool)": "setTradingOpen(bool)",
+    "setMaxSellAmount(uint256)": "setMaxSellAmount(uint256)",
+    "setRouter(address)": "setRouter(address)",
+    "setPair(address)": "setPair(address)",
+    "setOwner(address)": "setOwner(address)",
+    "setAdmin(address)": "setAdmin(address)",
+    "transferAdmin(address)": "transferAdmin(address)",
+    "setAuthority(address)": "setAuthority(address)",
+    "hasRole(bytes32,address)": "hasRole(bytes32,address)",
+    "grantRole(bytes32,address)": "grantRole(bytes32,address)",
+    "revokeRole(bytes32,address)": "revokeRole(bytes32,address)",
+    "getRoleMemberCount(bytes32)": "getRoleMemberCount(bytes32)",
+    "getRoleMember(bytes32,uint256)": "getRoleMember(bytes32,uint256)",
+    "setName(string)": "setName(string)",
+    "setSymbol(string)": "setSymbol(string)",
+    "upgradeTo(address)": "upgradeTo(address)",
+    "upgradeToAndCall(address,bytes)": "upgradeToAndCall(address,bytes)",
+    "changeAdmin(address)": "changeAdmin(address)",
+
+    # -----------------------------------------------------
+    # SUPPLY EXPANSION
+    # -----------------------------------------------------
+
+    "mint(address,uint256)": "mint(address,uint256)",
+    "mint(address,uint256,bool)": "mint(address,uint256,bool)",
+    "mint(uint256)": "mint(uint256)",
+    "issue(address,uint256)": "issue(address,uint256)",
 }
 
 
@@ -443,6 +492,7 @@ def group_detected_selectors(
         "trading": [],
         "limits": [],
         "tax": [],
+        "mint": [],
     }
 
     for item in detected:
@@ -450,6 +500,10 @@ def group_detected_selectors(
         function = item["function"]
 
         lower = function.lower()
+
+        if "mint(" in lower or lower.startswith("issue("):
+            groups["mint"].append(item)
+            continue
 
         # -------------------------------------------------
         # ERC20
@@ -559,6 +613,16 @@ EIP1967_IMPLEMENTATION_SLOT = (
     "ca3e2076cc3735a920a3ca505d382bbc"
 )
 
+EIP1967_ADMIN_SLOT = (
+    "0xb53127684a568b3173ae13b9f8a6016e"
+    "243e63b6e8ee1178d6a717850b5d6103"
+)
+
+EIP1967_BEACON_SLOT = (
+    "0xa3f0ad74e5423aebfd80d3ef43465783"
+    "35a9a72aeaee59ff6cb3582b35133d50"
+)
+
 
 def get_storage_at(
     address,
@@ -615,6 +679,9 @@ def detect_eip1967_proxy(
         "implementation": None,
         "confidence": "LOW",
         "reason": None,
+        "admin": None,
+        "beacon": None,
+        "upgrade_functions": [],
     }
 
     storage = get_storage_at(
@@ -628,15 +695,36 @@ def detect_eip1967_proxy(
         )
     )
 
-    if implementation:
+    admin = extract_address_from_storage(
+        get_storage_at(address, EIP1967_ADMIN_SLOT)
+    )
+    beacon = extract_address_from_storage(
+        get_storage_at(address, EIP1967_BEACON_SLOT)
+    )
+
+    if beacon and not implementation:
+        try:
+            raw = rpc_call(
+                "eth_call",
+                [{"to": beacon, "data": "0x5c60da1b"}, "latest"],
+            )
+            implementation = extract_address_from_storage(raw)
+        except Exception:
+            implementation = None
+
+    if implementation or beacon:
 
         result["detected"] = True
-        result["type"] = "EIP-1967"
+        result["type"] = "BEACON" if beacon else "EIP-1967"
         result["implementation"] = implementation
+        result["admin"] = admin
+        result["beacon"] = beacon
+        result["upgrade_functions"] = []
         result["confidence"] = "HIGH"
         result["reason"] = (
-            "EIP-1967 implementation address "
-            "was found in the standard storage slot."
+            "EIP-1967 beacon storage was detected."
+            if beacon
+            else "EIP-1967 implementation storage was detected."
         )
 
         return result
@@ -1228,6 +1316,12 @@ def analyze_implementation(
 
         "behavior": behavior,
 
+        "bytecode_patterns": match_bytecode_patterns(
+            groups=groups,
+            behavior=behavior,
+            proxy={"detected": False},
+        ),
+
         "warnings": [],
 
         "signals": [],
@@ -1256,6 +1350,12 @@ def analyze_implementation(
             "Implementation contains "
             "DELEGATECALL opcode."
         )
+
+    result["bytecode_patterns"] = match_bytecode_patterns(
+        groups=groups,
+        behavior=behavior,
+        proxy={"detected": False},
+    )
 
     if behavior[
         "selfdestruct_count"
@@ -1419,6 +1519,12 @@ def analyze_bytecode(
 
         "detected_selectors": [],
 
+        "bytecode_patterns": {
+            "database_version": "2026.10.1",
+            "matches": [],
+            "match_count": 0,
+        },
+
         "groups": {
 
             "erc20": [],
@@ -1434,6 +1540,7 @@ def analyze_bytecode(
             "limits": [],
 
             "tax": [],
+            "mint": [],
 
         },
 
@@ -1849,6 +1956,17 @@ def analyze_bytecode(
         result["signals"].append(
             "Storage-write opcodes detected: "
             f"{behavior['storage_writes']}."
+        )
+
+    result["bytecode_patterns"] = match_bytecode_patterns(
+        groups=result["groups"],
+        behavior=behavior,
+        proxy=result.get("proxy", {}),
+    )
+
+    for pattern in result["bytecode_patterns"]["matches"]:
+        result["signals"].append(
+            "Pattern " + pattern["id"] + ": " + pattern["title"] + "."
         )
 
     # =====================================================

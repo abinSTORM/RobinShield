@@ -677,9 +677,9 @@ def _analyze_implementation(
                 {},
             )
 
-            if isinstance(
-                behavior,
-                dict,
+            if (
+                bytecode_result.get("available") is True
+                and isinstance(behavior, dict)
             ):
 
                 result["behavior"] = behavior
@@ -806,6 +806,17 @@ def _analyze_implementation(
                                 storage_writes
                             ),
                         },
+                    }
+                )
+
+            else:
+                result["behavior"] = {"confidence": "LOW"}
+                result["security"].append(
+                    {
+                        "check": "Implementation Bytecode Behavior",
+                        "status": "UNKNOWN",
+                        "confidence": "LOW",
+                        "reason": "Implementation bytecode could not be retrieved; behavior checks were not performed.",
                     }
                 )
 
@@ -959,7 +970,7 @@ def security_scan(
     if token_abi is not None:
 
         print(
-            "✅ Contract ABI/source available."
+            "✅ Contract ABI available. Source verification is a separate status."
         )
 
         try:
@@ -1098,9 +1109,9 @@ def security_scan(
         {},
     )
 
-    if isinstance(
-        behavior,
-        dict,
+    if (
+        bytecode_result.get("available") is True
+        and isinstance(behavior, dict)
     ):
 
         delegatecall_count = int(

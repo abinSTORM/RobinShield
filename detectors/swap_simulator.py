@@ -166,6 +166,35 @@ UNISWAP_V2_ROUTER = Web3.to_checksum_address(
 
 )
 
+# Official Uniswap SwapRouter02 deployment on Robinhood Chain.
+UNISWAP_V3_ROUTER = Web3.to_checksum_address(
+    "0xCaf681a66D020601342297493863E78C959E5cb2"
+)
+V3_FEE_TIERS = (100, 500, 3000, 10000)
+
+V3_ROUTER_ABI = [
+    {
+        "inputs": [{
+            "components": [
+                {"internalType": "address", "name": "tokenIn", "type": "address"},
+                {"internalType": "address", "name": "tokenOut", "type": "address"},
+                {"internalType": "uint24", "name": "fee", "type": "uint24"},
+                {"internalType": "address", "name": "recipient", "type": "address"},
+                {"internalType": "uint256", "name": "amountIn", "type": "uint256"},
+                {"internalType": "uint256", "name": "amountOutMinimum", "type": "uint256"},
+                {"internalType": "uint160", "name": "sqrtPriceLimitX96", "type": "uint160"},
+            ],
+            "internalType": "struct IV3SwapRouter.ExactInputSingleParams",
+            "name": "params",
+            "type": "tuple",
+        }],
+        "name": "exactInputSingle",
+        "outputs": [{"internalType": "uint256", "name": "amountOut", "type": "uint256"}],
+        "stateMutability": "payable",
+        "type": "function",
+    }
+]
+
 # ============================================================
 
 # ANVIL
@@ -682,6 +711,89 @@ def get_router(
         abi=ROUTER_ABI,
 
     )
+
+
+def get_v3_router(w3):
+    return w3.eth.contract(
+        address=UNISWAP_V3_ROUTER,
+        abi=V3_ROUTER_ABI,
+    )
+
+
+def execute_v3_swap(w3, router, sender, token_in, token_out, fee, amount):
+    """Execute one exact-input V3 swap in the temporary fork."""
+    sender = Web3.to_checksum_address(sender)
+    token_in = Web3.to_checksum_address(token_in)
+    token_out = Web3.to_checksum_address(token_out)
+    token_in_contract = get_token_contract(w3, token_in)
+    token_out_contract = get_token_contract(w3, token_out)
+    before_in = get_balance(token_in_contract, sender)
+    before_out = get_balance(token_out_contract, sender)
+
+    params = (
+        token_in,
+        token_out,
+        int(fee),
+        sender,
+        int(amount),
+        0,
+        0,
+    )
+    swap_function = router.functions.exactInputSingle(params)
+    try:
+        swap_function.call({
+            "from": sender,
+            "gas": 1_500_000,
+            "gasPrice": w3.eth.gas_price,
+        })
+    except Exception as exc:
+        detail = str(exc).replace("\n", " ")[:600]
+        raise RuntimeError(
+            f"V3 exactInputSingle preflight reverted: {type(exc).__name__}: {detail}"
+        ) from exc
+
+    tx = swap_function.build_transaction({
+        "from": sender,
+        "gas": 1_500_000,
+        "gasPrice": w3.eth.gas_price,
+        "nonce": w3.eth.get_transaction_count(sender),
+    })
+    tx_hash = w3.eth.send_transaction(tx)
+    receipt = wait_for_receipt(w3, tx_hash)
+    after_in = get_balance(token_in_contract, sender)
+    after_out = get_balance(token_out_contract, sender)
+    spent = max(before_in - after_in, 0)
+    received = max(after_out - before_out, 0)
+    receipt_status = int(receipt.get("status", 0))
+    error = None
+    if receipt_status != 1:
+        try:
+            swap_function.call({
+                "from": sender,
+                "gas": 1_500_000,
+                "gasPrice": w3.eth.gas_price,
+            })
+        except Exception as exc:
+            detail = str(exc).replace("\n", " ")[:600]
+            error = (
+                f"V3 exactInputSingle reverted in the temporary fork: "
+                f"{type(exc).__name__}: {detail}"
+            )
+        if error is None:
+            error = "V3 exactInputSingle transaction reverted after a successful preflight simulation."
+    return {
+        "success": receipt_status == 1 and spent > 0 and received > 0,
+        "tx_hash": tx_hash.hex(),
+        "gas_used": int(receipt.get("gasUsed", 0)),
+        "receipt_status": receipt_status,
+        "error": error,
+        "input_spent": int(spent),
+        "output_received": int(received),
+        "before_input_balance": int(before_in),
+        "after_input_balance": int(after_in),
+        "before_output_balance": int(before_out),
+        "after_output_balance": int(after_out),
+    }
 
 # ============================================================
 
@@ -1365,6 +1477,8 @@ def approve_router(
 
     amount,
 
+    router_address=UNISWAP_V2_ROUTER,
+
 ):
 
     holder = Web3.to_checksum_address(
@@ -1375,7 +1489,7 @@ def approve_router(
 
     tx = token.functions.approve(
 
-        UNISWAP_V2_ROUTER,
+        Web3.to_checksum_address(router_address),
 
         int(amount),
 
@@ -1437,7 +1551,7 @@ def approve_router(
 
         holder,
 
-        UNISWAP_V2_ROUTER,
+        router_address,
 
     )
 
@@ -2607,6 +2721,8 @@ def run_isolated_buy_test(
     buyer_address,
     label,
     amount,
+    version="V2",
+    fee=3000,
 ):
     test = {
         "side": "BUY",
@@ -2628,6 +2744,8 @@ def run_isolated_buy_test(
         "before_quote_balance": 0,
         "after_quote_balance": 0,
         "error": None,
+        "protocol": "Uniswap V3" if str(version).upper() == "V3" else "Uniswap V2",
+        "fee_tier": int(fee) if str(version).upper() == "V3" else None,
     }
 
     process = None
@@ -2685,72 +2803,55 @@ def run_isolated_buy_test(
             quote_contract,
             buyer_address,
             received_quote,
+            router_address=(
+                UNISWAP_V3_ROUTER
+                if str(version).upper() == "V3"
+                else UNISWAP_V2_ROUTER
+            ),
         )
 
         test["approval"] = True
 
-        router = get_router(
-            fork_w3
-        )
+        is_v3 = str(version).upper() == "V3"
+        router = get_v3_router(fork_w3) if is_v3 else get_router(fork_w3)
 
         # --------------------------------------------------------
         # V2 EXPECTED BUY OUTPUT
         # --------------------------------------------------------
 
-        pair_contract = fork_w3.eth.contract(
-            address=pair_address,
-            abi=PAIR_ABI,
-        )
-
-        reserve0, reserve1, _ = (
-            pair_contract
-            .functions
-            .getReserves()
-            .call()
-        )
-
-        token0 = Web3.to_checksum_address(
-            pair_contract
-            .functions
-            .token0()
-            .call()
-        )
-
-        quote_checksum = Web3.to_checksum_address(
-            quote_token
-        )
-
-        token_checksum = Web3.to_checksum_address(
-            token_address
-        )
-
-        if token0.lower() == quote_checksum.lower():
-            quote_reserve = int(reserve0)
-            token_reserve = int(reserve1)
-        elif token0.lower() == token_checksum.lower():
-            quote_reserve = int(reserve1)
-            token_reserve = int(reserve0)
+        if is_v3:
+            expected_token_received = None
+            v3_buy = execute_v3_swap(
+                fork_w3, router, buyer_address, quote_token,
+                token_address, fee, received_quote,
+            )
+            buy = {
+                **v3_buy,
+                "token_received": v3_buy.get("output_received", 0),
+                "quote_spent": v3_buy.get("input_spent", 0),
+            }
         else:
-            raise RuntimeError(
-                "BUY pair tokens do not match quote/token addresses."
+            pair_contract = fork_w3.eth.contract(
+                address=pair_address,
+                abi=PAIR_ABI,
             )
-
-        expected_token_received = (
-            calculate_v2_expected_output(
-                received_quote,
-                quote_reserve,
-                token_reserve,
+            reserve0, reserve1, _ = pair_contract.functions.getReserves().call()
+            token0 = Web3.to_checksum_address(pair_contract.functions.token0().call())
+            quote_checksum = Web3.to_checksum_address(quote_token)
+            token_checksum = Web3.to_checksum_address(token_address)
+            if token0.lower() == quote_checksum.lower():
+                quote_reserve, token_reserve = int(reserve0), int(reserve1)
+            elif token0.lower() == token_checksum.lower():
+                quote_reserve, token_reserve = int(reserve1), int(reserve0)
+            else:
+                raise RuntimeError("BUY pair tokens do not match quote/token addresses.")
+            expected_token_received = calculate_v2_expected_output(
+                received_quote, quote_reserve, token_reserve
             )
-        )
-
-        buy = execute_buy(
-            fork_w3,
-            router,
-            buyer_address,
-            token_address,
-            quote_token,
-            received_quote,
-        )
+            buy = execute_buy(
+                fork_w3, router, buyer_address, token_address,
+                quote_token, received_quote,
+            )
 
         actual_token_received = int(
             buy.get(
@@ -3005,6 +3106,8 @@ def run_isolated_sell_test(
     expected_balance,
     label,
     amount,
+    version="V2",
+    fee=3000,
 ):
     test = {
         "side": "SELL",
@@ -3027,6 +3130,8 @@ def run_isolated_sell_test(
         "before_quote_balance": 0,
         "after_quote_balance": 0,
         "error": None,
+        "protocol": "Uniswap V3" if str(version).upper() == "V3" else "Uniswap V2",
+        "fee_tier": int(fee) if str(version).upper() == "V3" else None,
     }
 
     process = None
@@ -3110,6 +3215,11 @@ def run_isolated_sell_test(
             token,
             holder_address,
             amount,
+            router_address=(
+                UNISWAP_V3_ROUTER
+                if str(version).upper() == "V3"
+                else UNISWAP_V2_ROUTER
+            ),
         )
 
         test["approval"] = True
@@ -3118,19 +3228,31 @@ def run_isolated_sell_test(
         # SELL.
         # ----------------------------------------------------
 
-        router = get_router(
-            fork_w3
-        )
-
-        sell = execute_sell(
-            fork_w3,
-            router,
-            holder_address,
-            token_address,
-            quote_token,
-            pair_address,
-            amount,
-        )
+        if str(version).upper() == "V3":
+            router = get_v3_router(fork_w3)
+            v3_sell = execute_v3_swap(
+                fork_w3, router, holder_address, token_address,
+                quote_token, fee, amount,
+            )
+            sell = {
+                **v3_sell,
+                "token_spent": v3_sell.get("input_spent", 0),
+                "quote_received": v3_sell.get("output_received", 0),
+                "before_token_balance": v3_sell.get("before_input_balance", 0),
+                "after_token_balance": v3_sell.get("after_input_balance", 0),
+                "before_quote_balance": v3_sell.get("before_output_balance", 0),
+                "after_quote_balance": v3_sell.get("after_output_balance", 0),
+                "event_spent": 0,
+                "event_received": 0,
+                "event_pair_token_received": 0,
+                "error": v3_sell.get("error"),
+            }
+        else:
+            router = get_router(fork_w3)
+            sell = execute_sell(
+                fork_w3, router, holder_address, token_address,
+                quote_token, pair_address, amount,
+            )
 
         test["success"] = bool(
             sell.get("success")
@@ -3212,7 +3334,7 @@ def run_isolated_sell_test(
         )
 
         if not test["success"]:
-            test["error"] = (
+            test["error"] = sell.get("error") or (
                 "Router SELL transaction reverted "
                 "inside the temporary fork."
             )
@@ -3291,6 +3413,7 @@ def _is_infrastructure_error(
         "rpc request failed",
 
         "unable to connect to rpc",
+        "no suitable real quote-token holder had enough balance",
 
     ]
 
@@ -3329,18 +3452,18 @@ def calculate_runtime_sell_tax(
         or 0
     )
 
-    pair_received = int(
-        test.get(
-            "event_pair_token_received",
-            0,
-        )
-        or 0
-    )
+    # A missing/zero pair Transfer-event amount means the pool receipt was
+    # not measured. Treating that as zero would falsely report a 100% tax,
+    # especially for V3 tests that currently verify swap balances instead.
+    raw_pair_received = test.get("event_pair_token_received")
+    if raw_pair_received is None:
+        return None
+    pair_received = int(raw_pair_received or 0)
 
     if token_spent <= 0:
         return None
 
-    if pair_received < 0:
+    if pair_received <= 0:
         return None
 
     tax_amount = max(
@@ -3360,6 +3483,83 @@ def calculate_runtime_sell_tax(
 
 # ============================================================
 
+def _run_specific_wallet_sell_test(token_address, liquidity, wallet_address):
+    result = {
+        "address": Web3.to_checksum_address(wallet_address),
+        "status": "INCONCLUSIVE",
+        "tested": False,
+        "success": None,
+        "balance": 0,
+        "amount_in": 0,
+        "tx_hash": None,
+        "error": None,
+        "warning": "Runs only inside a temporary local fork; no mainnet transaction is sent.",
+    }
+    pair_address = liquidity.get("pair") or liquidity.get("pair_address")
+    quote_token = liquidity.get("quote_token")
+    if not pair_address or not quote_token:
+        result["error"] = "A supported pair and quote token are required."
+        return result
+    try:
+        w3 = get_web3(RPC_URL)
+        token = get_token_contract(w3, token_address)
+        balance = int(get_balance(token, wallet_address))
+        result["balance"] = balance
+        if balance <= 0:
+            result["error"] = "The supplied wallet has no token balance at the current block."
+            return result
+        amount = max(1, balance // 100)
+        result["amount_in"] = amount
+        test = run_isolated_sell_test(
+            token_address,
+            quote_token,
+            pair_address,
+            wallet_address,
+            balance,
+            "1% of supplied wallet balance",
+            amount,
+            version=liquidity.get("version", "V2"),
+            fee=(liquidity.get("fee") or (liquidity.get("best_pool_data") or {}).get("fee") or 3000),
+        )
+        result.update({
+            "status": "PASS" if test.get("success") else "FAIL",
+            "tested": True,
+            "success": bool(test.get("success")),
+            "tx_hash": test.get("tx_hash"),
+            "gas_used": test.get("gas_used"),
+            "quote_received": test.get("quote_received"),
+            "error": test.get("error"),
+        })
+    except Exception as exc:
+        result["error"] = str(exc)
+    return result
+
+
+def _attach_wallet_specific_sell_test(result, token_address, liquidity, check_address):
+    wallet_test = _run_specific_wallet_sell_test(token_address, liquidity, check_address)
+    result["wallet_specific_sell_test"] = wallet_test
+    if wallet_test["status"] == "FAIL":
+        result["tested"] = True
+        result["status"] = "WARNING"
+        result["risk"] = "HIGH"
+        result["warnings"].append(
+            "The supplied wallet's router SELL failed in the temporary fork at the scan-time state. Review the failure details; one fork result is not proof of a permanent honeypot."
+        )
+    elif wallet_test["status"] == "PASS":
+        result["tested"] = True
+        if result.get("status") in ("UNAVAILABLE", "UNKNOWN"):
+            result["status"] = "PASS"
+            result["risk"] = "LOW"
+            result["confidence"] = "MEDIUM"
+        result["signals"].append(
+            "Router SELL succeeded for the supplied wallet in a temporary fork at scan time."
+        )
+    else:
+        result["warnings"].append(
+            "A wallet-specific router SELL could not be confirmed; see wallet_specific_sell_test.error."
+        )
+
+
 def analyze_swap_simulation(
 
     token_address,
@@ -3369,6 +3569,8 @@ def analyze_swap_simulation(
     holders=None,
 
     deep=False,
+
+    check_address=None,
 
 ):
 
@@ -3490,21 +3692,53 @@ def analyze_swap_simulation(
 
         return result
 
-    if liquidity.get(
-
-        "dex"
-
-    ) != "Uniswap V2":
-
+    dex = str(liquidity.get("dex") or "").strip().lower()
+    version = str(liquidity.get("version") or "").strip().upper()
+    is_v3 = version == "V3" or "v3" in dex
+    is_v2 = version == "V2" or "v2" in dex
+    if not (is_v2 or is_v3):
         result["warnings"].append(
-
-            "Deep router simulation currently supports "
-
-            "Uniswap V2 pools only."
-
+            f"Deep router simulation does not support detected pool type: {liquidity.get('dex') or 'unknown'}."
         )
-
         return result
+
+    fee = liquidity.get("fee")
+    best_pool_data = liquidity.get("best_pool_data")
+    if fee is None and isinstance(best_pool_data, dict):
+        fee = best_pool_data.get("fee")
+    try:
+        fee = int(fee) if fee is not None else None
+    except (TypeError, ValueError):
+        fee = None
+    if is_v3 and fee not in V3_FEE_TIERS:
+        result["warnings"].append(
+            "Deep V3 swap testing is unavailable because the pool fee tier is missing or unsupported."
+        )
+        return result
+    if is_v3:
+        pool_data = liquidity.get("best_pool_data")
+        pool_data = pool_data if isinstance(pool_data, dict) else {}
+        active_liquidity = liquidity.get(
+            "v3_liquidity",
+            pool_data.get("v3_liquidity"),
+        )
+        try:
+            active_liquidity = int(active_liquidity)
+        except (TypeError, ValueError):
+            active_liquidity = None
+        if active_liquidity == 0:
+            result["pool_active_liquidity"] = 0
+            result["warnings"].append(
+                "V3 pool reports zero active liquidity at the current price. Router swaps were not attempted; positions outside the current price range were not analyzed. This does not establish whether token transfer restrictions exist."
+            )
+            return result
+    if is_v3:
+        result["method"] = "ANVIL_FORK_UNISWAP_V3_BUY_SELL"
+        result["router"] = UNISWAP_V3_ROUTER
+        result["fee_tier"] = fee
+        result["warnings"].append(
+            "Uniswap V3 exactInputSingle does not support fee-on-transfer tokens; a reverted swap can indicate V3 incompatibility and is not by itself proof of a honeypot."
+        )
 
     # ========================================================
 
@@ -3598,6 +3832,20 @@ def analyze_swap_simulation(
 
         )
 
+        if is_v3:
+            chain_id = int(live_w3.eth.chain_id)
+            if chain_id != 4663:
+                result["warnings"].append(
+                    f"Deep V3 swap testing requires Robinhood Chain (4663); connected chain is {chain_id}."
+                )
+                return result
+            router_code = live_w3.eth.get_code(UNISWAP_V3_ROUTER)
+            if not router_code or not any(router_code):
+                result["warnings"].append(
+                    "The configured Uniswap V3 SwapRouter02 has no deployed code on the connected chain."
+                )
+                return result
+
     except Exception as e:
 
         result["status"] = "ERROR"
@@ -3657,6 +3905,11 @@ def analyze_swap_simulation(
             "on-chain token balance was found."
 
         )
+
+        if check_address:
+            _attach_wallet_specific_sell_test(
+                result, token_address, liquidity, check_address
+            )
 
         return result
 
@@ -3796,6 +4049,8 @@ def analyze_swap_simulation(
             holder_balance,
             label,
             amount,
+            version="V3" if is_v3 else "V2",
+            fee=fee or 3000,
         )
 
         test[
@@ -3882,6 +4137,15 @@ def analyze_swap_simulation(
             / len(
                 runtime_sell_tax_samples
             )
+        )
+    elif any(
+        str(test.get("protocol", "")).upper() == "UNISWAP V3"
+        for test in result.get("tests", [])
+    ):
+        result.setdefault("warnings", []).append(
+            "Runtime V3 sell tax was not calculated because the token amount "
+            "credited to the pool was not measured from Transfer events. "
+            "Successful fork swaps do not by themselves prove zero sell tax."
         )
 
     # ========================================================
@@ -4100,49 +4364,25 @@ def analyze_swap_simulation(
 
             )
 
-            result[
-
-                "warnings"
-
-            ].append(
-
-                "This infrastructure failure is not evidence that "
-
-                "the token is a honeypot."
-
+            result["warnings"].append(
+                "This infrastructure failure is not evidence that the token is a honeypot."
             )
 
         else:
-
-            result[
-
-                "status"
-
-            ] = "WARNING"
-
-            result[
-
-                "risk"
-
-            ] = "HIGH"
-
-            result[
-
-                "confidence"
-
-            ] = "HIGH"
-
-            result[
-
-                "warnings"
-
-            ].append(
-
-                "All deep SELL simulations failed inside "
-
-                "temporary local forks."
-
+            result["status"] = "WARNING"
+            result["risk"] = "HIGH"
+            result["confidence"] = "HIGH"
+            result["warnings"].append(
+                "All deep SELL simulations failed inside temporary local forks."
             )
+
+    if is_v3 and passed == 0 and result.get("status") != "UNAVAILABLE":
+        result["status"] = "WARNING"
+        result["risk"] = "MEDIUM"
+        result["confidence"] = "LOW"
+        result["warnings"].append(
+            "All V3 deep SELL attempts failed. The result cannot distinguish token restrictions from V3 fee-on-transfer incompatibility or pool/router conditions."
+        )
 
     # ========================================================
 
@@ -4255,6 +4495,10 @@ def analyze_swap_simulation(
             buy_label,
 
             buy_amount,
+
+            version="V3" if is_v3 else "V2",
+
+            fee=fee or 3000,
 
         )
 
@@ -4469,6 +4713,11 @@ def analyze_swap_simulation(
 
             "inside temporary local forks."
 
+        )
+
+    if check_address:
+        _attach_wallet_specific_sell_test(
+            result, token_address, liquidity, check_address
         )
 
     return result

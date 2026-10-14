@@ -4,9 +4,15 @@ from core.cache import load_cache
 import requests
 import json
 import time
+import os
+from config import BLOCKSCOUT_API, BLOCKSCOUT_SMART_CONTRACT
 
 
-BASE_URL = "https://robinhoodchain.blockscout.com/api"
+_BLOCKSCOUT_ROOT = BLOCKSCOUT_API.removesuffix("/api/v2").rstrip("/")
+BASE_URL = os.getenv(
+    "BLOCKSCOUT_LEGACY_API",
+    _BLOCKSCOUT_ROOT + "/api",
+)
 
 
 def get_abi(address):
@@ -44,12 +50,11 @@ def get_abi(address):
     # API URL
     # ==================================================
 
-    url = (
-        f"{BASE_URL}"
-        f"?module=contract"
-        f"&action=getabi"
-        f"&address={address}"
-    )
+    params = {
+        "module": "contract",
+        "action": "getabi",
+        "address": address,
+    }
 
     retries = 3
 
@@ -57,14 +62,13 @@ def get_abi(address):
     # FETCH
     # ==================================================
 
-    for attempt in range(
-        retries
-    ):
+    for attempt in range(retries):
 
         try:
 
             response = requests.get(
-                url,
+                BASE_URL,
+                params=params,
                 timeout=10,
             )
 
@@ -89,6 +93,13 @@ def get_abi(address):
             # ------------------------------------------
             # HTTP ERROR
             # ------------------------------------------
+
+            if response.status_code in (401, 402, 403, 404):
+                print(
+                    "Robinhood Chain explorer API returned "
+                    f"HTTP {response.status_code}; trying supported fallbacks."
+                )
+                break
 
             if response.status_code != 200:
 
@@ -118,27 +129,16 @@ def get_abi(address):
             # API RESULT
             # ------------------------------------------
 
-            if str(
-                data.get("status")
-            ) != "1":
+            message = str(data.get("message", "")).lower()
 
-                # Do NOT print the API message here.
-                #
-                # Blockscout commonly returns messages
-                # such as "Contract source code not verified".
-                #
-                # The scanner handles ABI-unavailable
-                # status itself.
-
-                return None
+            if message != "ok":
+                return _get_abi_v2(address)
 
             # ------------------------------------------
             # ABI
             # ------------------------------------------
 
-            raw_abi = data.get(
-                "result"
-            )
+            raw_abi = data.get("result")
 
             if not raw_abi:
 
@@ -206,8 +206,78 @@ def get_abi(address):
 
             return None
 
-    # ==================================================
-    # FAILED
-    # ==================================================
+    return _get_abi_v2(address)
 
-    return None
+
+def _get_abi_v2(address):
+    """Fallback to Blockscout's native per-chain REST contract endpoint."""
+    try:
+        response = requests.get(
+            f"{BLOCKSCOUT_SMART_CONTRACT}/{address}",
+            timeout=10,
+        )
+        if response.status_code != 200:
+            print(
+                "Blockscout contract API unavailable: "
+                f"HTTP {response.status_code}."
+            )
+            return _get_abi_pro(address)
+
+        data = response.json()
+        raw_abi = data.get("abi")
+        if isinstance(raw_abi, str):
+            raw_abi = json.loads(raw_abi)
+        if not isinstance(raw_abi, list) or not raw_abi:
+            return None
+
+        save_cache(address, raw_abi)
+        print("✅ ABI downloaded from Blockscout and cached")
+        return raw_abi
+    except (requests.exceptions.RequestException, ValueError, TypeError) as error:
+        print(f"Blockscout contract API lookup failed: {error}")
+        return _get_abi_pro(address)
+
+
+def _get_abi_pro(address):
+    """Use Blockscout's keyed multichain API when the local explorer is blocked."""
+    api_key = os.environ.get("BLOCKSCOUT_API_KEY")
+    if not api_key:
+        print(
+            "No BLOCKSCOUT_API_KEY is configured; verified source/ABI "
+            "could not be fetched from the available explorer endpoints."
+        )
+        return None
+
+    try:
+        response = requests.get(
+            "https://api.blockscout.com/v2/api",
+            params={
+                "chainid": "4663",
+                "module": "contract",
+                "action": "getabi",
+                "address": address,
+                "apikey": api_key,
+            },
+            timeout=10,
+        )
+        if response.status_code != 200:
+            print(
+                "Blockscout keyed API unavailable: "
+                f"HTTP {response.status_code}."
+            )
+            return None
+
+        data = response.json()
+        raw_abi = data.get("result")
+        if str(data.get("message", "")).lower() != "ok" or not raw_abi:
+            return None
+        abi = json.loads(raw_abi) if isinstance(raw_abi, str) else raw_abi
+        if not isinstance(abi, list) or not abi:
+            return None
+
+        save_cache(address, abi)
+        print("✅ ABI downloaded from Blockscout Pro API and cached")
+        return abi
+    except (requests.exceptions.RequestException, ValueError, TypeError) as error:
+        print(f"Blockscout keyed API lookup failed: {error}")
+        return None

@@ -34,6 +34,6 @@ def scan(functions):
     return create_report(
         "Blacklist",
         "PASS",
-        "HIGH",
-        "No blacklist-related functions detected."
+        "LOW",
+        "No recognized blacklist functions were found in the ABI; custom or obfuscated restrictions may not be detected."
     )

@@ -10,7 +10,20 @@ from detectors.swap_simulator import (
     start_anvil,
     stop_anvil,
     ANVIL_RPC_URL,
+    get_router,
+    get_v3_router,
+    execute_v3_swap,
+    UNISWAP_V3_ROUTER,
+    UNISWAP_V2_ROUTER,
+    get_token_contract,
+    get_balance,
+    set_account_balance,
+    fund_buyer_with_quote_token,
+    approve_router,
+    execute_buy,
+    execute_sell,
 )
+from core.lp import PAIR_ABI
 
 # =========================================================
 # TAX FUNCTION NAMES
@@ -56,12 +69,48 @@ TAX_STATE_NAMES = {
 TAX_SETTER_FUNCTIONS = [
     "setTax",
     "setTaxes",
+    "setTaxRate",
+    "setTaxRates",
+    "setTaxPercent",
     "updateTaxes",
+    "updateTax",
+    "updateTaxRates",
+    "updateBuyTax",
+    "updateSellTax",
     "setBuyTax",
     "setSellTax",
     "setBuyTaxRate",
     "setSellTaxRate",
+    "setFee",
+    "setFees",
+    "setFeeRate",
+    "setFeePercent",
+    "setBuyFee",
+    "setSellFee",
+    "setBuyFeeRate",
+    "setSellFeeRate",
+    "setBuyTotalFees",
+    "setSellTotalFees",
+    "setTotalFees",
 ]
+
+
+def _classify_expiration_getters(before_values, after_values):
+    if not any(
+        value is not None
+        for value in tuple(before_values) + tuple(after_values)
+    ):
+        return (
+            "GETTER_DATA_UNAVAILABLE",
+            "INCONCLUSIVE",
+            "All before/after tax and state getter reads were unavailable; "
+            "successful swaps alone do not establish expiration behavior.",
+        )
+
+    if tuple(before_values) != tuple(after_values):
+        return "CHANGED_AFTER_EXPIRATION", "PASS", None
+
+    return "NO_CHANGE_AFTER_EXPIRATION", "INFO", None
 
 
 # =========================================================
@@ -136,9 +185,12 @@ def analyze_tax_setter_permissions(
     result = {
         "status": "UNKNOWN",
         "confidence": "LOW",
-        "owner_restricted": False,
-        "admin_restricted": False,
+        "owner_restricted": None,
+        "admin_restricted": None,
+        "authorization": "NOT_PROVEN_FROM_ABI",
         "unrestricted": False,
+        "owner_surface_detected": False,
+        "role_surface_detected": False,
         "signals": [],
         "warnings": [],
     }
@@ -183,29 +235,28 @@ def analyze_tax_setter_permissions(
     )
 
     if owner_present:
-        result["owner_restricted"] = True
+        result["owner_surface_detected"] = True
 
         result["signals"].append(
-            "Ownership functions are present; tax setter access "
-            "may be controlled by ownership."
+            "Ownership functions are present, but the ABI does not prove "
+            "that tax setters are restricted to the owner."
         )
 
     if admin_present:
-        result["admin_restricted"] = True
+        result["role_surface_detected"] = True
 
         result["signals"].append(
-            "Administrative access-control functions are present."
+            "Role/admin functions are present, but their permissions over "
+            "tax setters were not proven."
         )
 
     if not owner_present and not admin_present:
-        result["unrestricted"] = True
-
         result["status"] = "WARNING"
         result["confidence"] = "MEDIUM"
 
         result["warnings"].append(
-            "Tax setters were detected, but no recognized "
-            "owner/admin access-control functions were found."
+            "Tax setters were detected, but ABI inspection could not "
+            "establish who can call them. Do not assume they are unrestricted."
         )
 
         result["signals"].append(
@@ -314,6 +365,8 @@ def analyze_tax_expiration_behavior(
     address,
     abi,
     expiration_time,
+    liquidity=None,
+    enabled=False,
 ):
     result = {
         "tested": False,
@@ -326,13 +379,65 @@ def analyze_tax_expiration_behavior(
         "after_sell_tax": None,
         "behavior": None,
         "reason": None,
+        "before_buy_swap": None,
+        "before_sell_swap": None,
+        "after_buy_swap": None,
+        "after_sell_swap": None,
+        "before_swap_details": None,
+        "after_swap_details": None,
+        "getter_errors": {},
     }
+
+    if not enabled:
+        result["reason"] = (
+            "Expiration behavior testing requires deep mode."
+        )
+        return result
 
     if expiration_time is None:
         result["reason"] = (
             "No tax expiration timestamp detected."
         )
         return result
+
+    liquidity = liquidity or {}
+    pair_address = liquidity.get("pair") or liquidity.get("pair_address")
+    quote_token = liquidity.get("quote_token")
+    if not pair_address or not quote_token:
+        result["status"] = "INCONCLUSIVE"
+        result["reason"] = (
+            "A supported liquidity pair and quote token are required "
+            "for expiration router swaps."
+        )
+        return result
+
+    version = str(liquidity.get("version") or "").upper()
+    is_v3 = version == "V3" or "v3" in str(liquidity.get("dex") or "").lower()
+    pool_data = liquidity.get("best_pool_data") or {}
+    fee = liquidity.get("fee", pool_data.get("fee"))
+    try:
+        fee = int(fee) if fee is not None else None
+    except (TypeError, ValueError):
+        fee = None
+    if is_v3 and fee not in (100, 500, 3000, 10000):
+        result["status"] = "INCONCLUSIVE"
+        result["reason"] = "V3 pool fee tier is missing or unsupported; expiration swaps were not attempted."
+        return result
+    if is_v3:
+        active_liquidity = liquidity.get("v3_liquidity")
+        if active_liquidity is None and isinstance(pool_data, dict):
+            active_liquidity = pool_data.get("v3_liquidity")
+        try:
+            active_liquidity = int(active_liquidity)
+        except (TypeError, ValueError):
+            active_liquidity = None
+        if active_liquidity == 0:
+            result["status"] = "INCONCLUSIVE"
+            result["reason"] = (
+                "The V3 pool reports zero active liquidity at the current price; "
+                "before/after expiration swaps cannot be assessed. Out-of-range positions were not analyzed."
+            )
+            return result
 
     process = None
 
@@ -341,8 +446,10 @@ def analyze_tax_expiration_behavior(
 
         process = start_anvil()
 
-        fork_w3 = get_web3(
-            ANVIL_RPC_URL
+        fork_w3 = Web3(
+            Web3.HTTPProvider(
+                ANVIL_RPC_URL
+            )
         )
 
         token_address = (
@@ -351,7 +458,7 @@ def analyze_tax_expiration_behavior(
             )
         )
 
-        token_contract = (
+        expiration_contract = (
             fork_w3.eth.contract(
                 address=token_address,
                 abi=abi,
@@ -363,26 +470,17 @@ def analyze_tax_expiration_behavior(
         ):
             try:
                 function = getattr(
-                    token_contract.functions,
+                    expiration_contract.functions,
                     function_name,
                 )
 
                 return function().call()
 
-            except Exception:
+            except Exception as exc:
+                result["getter_errors"][function_name] = (
+                    f"{type(exc).__name__}: {exc}"
+                )
                 return None
-
-        result["before_state"] = (
-            read_value("state")
-        )
-
-        result["before_buy_tax"] = (
-            read_value("buyTaxRate")
-        )
-
-        result["before_sell_tax"] = (
-            read_value("sellTaxRate")
-        )
 
         current_block = (
             fork_w3.eth.get_block(
@@ -393,6 +491,133 @@ def analyze_tax_expiration_behavior(
         current_timestamp = int(
             current_block["timestamp"]
         )
+
+        if is_v3:
+            chain_id = int(fork_w3.eth.chain_id)
+            if chain_id != 4663:
+                result["status"] = "INCONCLUSIVE"
+                result["reason"] = f"Expiration swap testing requires Robinhood Chain (4663); fork chain is {chain_id}."
+                return result
+            router_code = fork_w3.eth.get_code(UNISWAP_V3_ROUTER)
+            if not router_code or not any(router_code):
+                result["status"] = "INCONCLUSIVE"
+                result["reason"] = "The configured Uniswap V3 SwapRouter02 has no deployed code on the fork."
+                return result
+
+        if current_timestamp >= int(expiration_time):
+            result["status"] = "INCONCLUSIVE"
+            result["reason"] = (
+                "Expiration had already passed when the temporary fork "
+                "started, so a before-expiration swap could not be tested."
+            )
+            return result
+
+        token_address = Web3.to_checksum_address(address)
+        pair_address = Web3.to_checksum_address(pair_address)
+        quote_token = Web3.to_checksum_address(quote_token)
+        if is_v3:
+            quote_reserve = int(
+                get_balance(get_token_contract(fork_w3, quote_token), pair_address)
+            )
+        else:
+            pair = fork_w3.eth.contract(
+                address=pair_address,
+                abi=PAIR_ABI,
+            )
+            reserve0, reserve1, _ = pair.functions.getReserves().call()
+            token0 = Web3.to_checksum_address(pair.functions.token0().call())
+            quote_reserve = int(
+                reserve0 if token0.lower() == quote_token.lower() else reserve1
+            )
+        amount_in = max(1, quote_reserve // 1000)
+        buyer = Web3.to_checksum_address(fork_w3.eth.accounts[0])
+        set_account_balance(fork_w3, buyer)
+        funding = fund_buyer_with_quote_token(
+            fork_w3, quote_token, pair_address, buyer, amount_in
+        )
+        if int(funding.get("received", 0)) <= 0:
+            raise RuntimeError("Temporary fork quote-token funding was zero.")
+        quote_contract = get_token_contract(fork_w3, quote_token)
+        swap_token_contract = get_token_contract(fork_w3, token_address)
+        router = get_v3_router(fork_w3) if is_v3 else get_router(fork_w3)
+
+        def exercise_swaps():
+            approve_router(
+                fork_w3,
+                quote_contract,
+                buyer,
+                get_balance(quote_contract, buyer),
+                router_address=UNISWAP_V3_ROUTER if is_v3 else UNISWAP_V2_ROUTER,
+            )
+            if is_v3:
+                v3_buy = execute_v3_swap(
+                    fork_w3, router, buyer, quote_token, token_address,
+                    fee, get_balance(quote_contract, buyer),
+                )
+                buy = {
+                    **v3_buy,
+                    "token_received": v3_buy.get("output_received", 0),
+                    "quote_spent": v3_buy.get("input_spent", 0),
+                }
+            else:
+                buy = execute_buy(
+                    fork_w3, router, buyer, token_address, quote_token,
+                    get_balance(quote_contract, buyer),
+                )
+            token_amount = int(buy.get("token_received", 0) or 0)
+            if not buy.get("success") or token_amount <= 0:
+                raise RuntimeError("Router BUY failed or received no tokens.")
+            approve_router(
+                fork_w3,
+                swap_token_contract,
+                buyer,
+                token_amount,
+                router_address=UNISWAP_V3_ROUTER if is_v3 else UNISWAP_V2_ROUTER,
+            )
+            if is_v3:
+                v3_sell = execute_v3_swap(
+                    fork_w3, router, buyer, token_address, quote_token,
+                    fee, token_amount,
+                )
+                sell = {
+                    **v3_sell,
+                    "token_spent": v3_sell.get("input_spent", 0),
+                    "quote_received": v3_sell.get("output_received", 0),
+                }
+            else:
+                sell = execute_sell(
+                    fork_w3, router, buyer, token_address, quote_token,
+                    pair_address, token_amount,
+                )
+            return {
+                "buy": {
+                    "success": buy.get("success") is True,
+                    "protocol": "Uniswap V3" if is_v3 else "Uniswap V2",
+                    "fee_tier": fee if is_v3 else None,
+                    "tx_hash": buy.get("tx_hash"),
+                    "quote_spent": int(buy.get("quote_spent", 0) or 0),
+                    "token_received": token_amount,
+                },
+                "sell": {
+                    "success": sell.get("success") is True,
+                    "protocol": "Uniswap V3" if is_v3 else "Uniswap V2",
+                    "fee_tier": fee if is_v3 else None,
+                    "tx_hash": sell.get("tx_hash"),
+                    "token_spent": int(sell.get("token_spent", 0) or 0),
+                    "quote_received": int(sell.get("quote_received", 0) or 0),
+                },
+            }
+
+        result["before_state"] = read_value("state")
+        result["before_buy_tax"] = read_value("buyTaxRate")
+        result["before_sell_tax"] = read_value("sellTaxRate")
+        result["before_buy_swap"], result["before_sell_swap"] = (
+            None, None
+        )
+        before_swaps = exercise_swaps()
+        result["before_swap_details"] = before_swaps
+        result["before_buy_swap"] = before_swaps["buy"]["success"]
+        result["before_sell_swap"] = before_swaps["sell"]["success"]
 
         target_timestamp = (
             max(
@@ -412,17 +637,13 @@ def analyze_tax_expiration_behavior(
             [],
         )
 
-        result["after_state"] = (
-            read_value("state")
-        )
-
-        result["after_buy_tax"] = (
-            read_value("buyTaxRate")
-        )
-
-        result["after_sell_tax"] = (
-            read_value("sellTaxRate")
-        )
+        result["after_state"] = read_value("state")
+        result["after_buy_tax"] = read_value("buyTaxRate")
+        result["after_sell_tax"] = read_value("sellTaxRate")
+        after_swaps = exercise_swaps()
+        result["after_swap_details"] = after_swaps
+        result["after_buy_swap"] = after_swaps["buy"]["success"]
+        result["after_sell_swap"] = after_swaps["sell"]["success"]
 
         before_values = (
             result["before_state"],
@@ -436,21 +657,27 @@ def analyze_tax_expiration_behavior(
             result["after_sell_tax"],
         )
 
-        if before_values != after_values:
-            result["behavior"] = (
-                "CHANGED_AFTER_EXPIRATION"
-            )
-            result["status"] = "PASS"
+        if not all((
+            result["before_buy_swap"], result["before_sell_swap"],
+            result["after_buy_swap"], result["after_sell_swap"],
+        )):
+            result["behavior"] = "SWAP_RESULT_INCONCLUSIVE"
+            result["status"] = "INCONCLUSIVE"
+            result["reason"] = "At least one real router swap did not succeed."
         else:
-            result["behavior"] = (
-                "NO_CHANGE_AFTER_EXPIRATION"
+            (
+                result["behavior"],
+                result["status"],
+                result["reason"],
+            ) = _classify_expiration_getters(
+                before_values,
+                after_values,
             )
-            result["status"] = "INFO"
 
         result["tested"] = True
 
     except Exception as exc:
-        result["status"] = "ERROR"
+        result["status"] = "INCONCLUSIVE"
         result["reason"] = str(exc)
 
     finally:
@@ -711,6 +938,8 @@ def _analyze_tax_from_bytecode(
 def analyze_tax(
     address,
     abi=None,
+    liquidity=None,
+    deep_scan=False,
 ):
 
     result = _unknown_result()
@@ -899,6 +1128,8 @@ def analyze_tax(
             address,
             abi,
             result["tax_expiration_time"],
+            liquidity=liquidity,
+            enabled=deep_scan,
         )
     )
 

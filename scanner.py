@@ -1,4 +1,7 @@
+import json
+import os
 import sys
+from datetime import datetime, timezone
 
 
 # =========================================================
@@ -31,6 +34,8 @@ from analysis.holders import (
 
 from core.abi import get_abi
 from core.bytecode import analyze_bytecode
+from analysis.token_identity import analyze_token_identity
+from engines.admin_control_audit import analyze_admin_controls
 
 
 # =========================================================
@@ -226,6 +231,27 @@ def print_analysis_header(
     )
 
 
+def _merge_abis(*abis):
+    merged = []
+    seen = set()
+    for abi in abis:
+        if not isinstance(abi, list):
+            continue
+        for item in abi:
+            if not isinstance(item, dict):
+                continue
+            key = (
+                item.get("type"),
+                item.get("name"),
+                tuple(value.get("type") for value in item.get("inputs", []) if isinstance(value, dict)),
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(item)
+    return merged
+
+
 # =========================================================
 # LIQUIDITY PRINTING
 # =========================================================
@@ -325,15 +351,30 @@ def print_liquidity(
             f"{liquidity_eth}"
         )
 
-    print(
-        f"Liquidity USD: "
-        f"${liquidity.get('liquidity_usd', 0)}"
-    )
+    liquidity_usd_status = liquidity.get("liquidity_usd_status", "CALCULATED")
+    if liquidity_usd_status == "NOT_CALCULATED_V3_RANGE_VALUATION":
+        liquidity_usd_display = "NOT CALCULATED (V3 position-range valuation unavailable)"
+    elif liquidity_usd_status == "ESTIMATED_DEXSCREENER":
+        liquidity_usd_display = f"${liquidity.get('liquidity_usd', 0)} (DexScreener estimate)"
+    else:
+        liquidity_usd_display = f"${liquidity.get('liquidity_usd', 0)}"
+    print(f"Liquidity USD: {liquidity_usd_display}")
 
-    print(
-        f"Total discovered liquidity USD: "
-        f"${liquidity.get('total_liquidity_usd', liquidity.get('liquidity_usd', 0))}"
-    )
+    if liquidity_usd_status == "NOT_CALCULATED_V3_RANGE_VALUATION":
+        print("Total discovered liquidity USD: NOT CALCULATED (V3 position-range valuation unavailable)")
+    elif any(
+        pool.get("liquidity_usd_status") == "ESTIMATED_DEXSCREENER"
+        for pool in liquidity.get("pools", [])
+    ):
+        print(
+            "Total discovered liquidity USD (includes DexScreener estimates): "
+            f"${liquidity.get('total_liquidity_usd', liquidity.get('liquidity_usd', 0))}"
+        )
+    else:
+        print(
+            f"Total discovered liquidity USD: "
+            f"${liquidity.get('total_liquidity_usd', liquidity.get('liquidity_usd', 0))}"
+        )
 
     print(
         f"Risk: "
@@ -409,6 +450,16 @@ def print_discovered_pools(
                     f"{pool.get('fee')}"
                 )
 
+        if pool.get("v3_liquidity") is not None:
+            print(
+                f"  V3 active liquidity at current price: "
+                f"{pool.get('v3_liquidity')}"
+            )
+            print(
+                f"  Active liquidity status: "
+                f"{pool.get('active_liquidity_status', 'UNKNOWN')}"
+            )
+
         quote_token = pool.get(
             "quote_token"
         )
@@ -475,10 +526,18 @@ def print_discovered_pools(
                 f"{pool_eth}"
             )
 
-        print(
-            f"  Liquidity USD: "
-            f"${pool.get('liquidity_usd', 0)}"
-        )
+        if pool.get("liquidity_usd_status") == "NOT_CALCULATED_V3_RANGE_VALUATION":
+            print("  Liquidity USD: NOT CALCULATED (V3 position-range valuation unavailable)")
+        elif pool.get("liquidity_usd_status") == "ESTIMATED_DEXSCREENER":
+            print(
+                "  Liquidity USD (DexScreener estimate): "
+                f"${pool.get('liquidity_usd', 0)}"
+            )
+        else:
+            print(
+                f"  Liquidity USD: "
+                f"${pool.get('liquidity_usd', 0)}"
+            )
 
         print(
             f"  Risk: "
@@ -522,6 +581,20 @@ def analyze_lp_safety(
 
     if not pair:
 
+        return lp_safety
+
+    if str(liquidity.get("version", "")).upper() == "V3":
+        lp_safety.update({
+            "method": "UNISWAP_V3_POSITION_NFT_ANALYSIS",
+            "reason": (
+                "Uniswap V3 liquidity is held in NFT positions; "
+                "the V2 LP-token burn calculation does not apply. "
+                "Position ownership and unlockability were not analyzed."
+            ),
+            "warnings": [
+                "Uniswap V3 position ownership and lock status remain unknown."
+            ],
+        })
         return lp_safety
 
     try:
@@ -588,6 +661,13 @@ def print_lp_safety(
         "burn_percentage"
     )
 
+    if burn_percentage is None:
+        burn_percentage_display = "UNKNOWN"
+    elif 0 < float(burn_percentage) < 0.0001:
+        burn_percentage_display = "<0.0001"
+    else:
+        burn_percentage_display = f"{float(burn_percentage):g}"
+
     active_lp = lp_safety.get(
         "active_lp"
     )
@@ -599,12 +679,12 @@ def print_lp_safety(
 
     print(
         f"Burn percentage: "
-        f"{burn_percentage if burn_percentage is not None else 'UNKNOWN'}"
+        f"{burn_percentage_display}"
         f"{'%' if burn_percentage is not None else ''}"
     )
 
     print(
-        f"Active LP: "
+        f"LP not at recognized burn addresses (lock status unknown): "
         f"{active_lp if active_lp is not None else 'UNKNOWN'}"
     )
 
@@ -957,6 +1037,10 @@ def analyze_contract_security(
         )
 
         return contract_result
+
+    print(
+        "ℹ️ Explorer-verified source/ABI availability does not certify that a token is safe or that future sells will succeed."
+    )
 
     # =====================================================
     # NORMALIZE SECURITY REPORT
@@ -1341,6 +1425,31 @@ def analyze_proxy(
             f"Proxy analysis failed: {e}"
         )
 
+    pattern_reports = [("Token/proxy bytecode", bytecode_report.get("bytecode_patterns", {}))]
+    if isinstance(implementation_analysis, dict):
+        pattern_reports.append((
+            "Implementation bytecode",
+            implementation_analysis.get("bytecode_patterns", {}),
+        ))
+
+    print()
+    print("Bytecode Pattern Review")
+    for source, report in pattern_reports:
+        matches = report.get("matches", []) if isinstance(report, dict) else []
+        print(f"{source}: {len(matches)} indicator(s)")
+        for match in matches:
+            evidence = ", ".join(match.get("evidence", []))
+            print(
+                f"  [{match.get('severity', 'INFO')}] {match.get('id')}: "
+                f"{match.get('title')} — {match.get('description')}"
+            )
+            if evidence:
+                print(f"    Evidence: {evidence}")
+    print(
+        "Pattern indicators are not a definitive scam verdict; "
+        "review the reported evidence and contract permissions."
+    )
+
     return (
         bytecode_report,
         proxy,
@@ -1355,6 +1464,7 @@ def analyze_proxy(
 def analyze_tax_section(
     token_address,
     token_abi,
+    liquidity,
 ):
 
     print_section(
@@ -1399,6 +1509,8 @@ def analyze_tax_section(
         tax_analysis = analyze_tax(
             token_address,
             token_abi,
+            liquidity=liquidity,
+            deep_scan=DEEP_SCAN,
         )
 
         print_analysis_header(
@@ -1540,6 +1652,93 @@ def analyze_tax_section(
                 f"{tax_expiration_status}"
             )
 
+        tax_expiration_behavior = tax_analysis.get(
+            "tax_expiration_behavior",
+            {},
+        )
+
+        if isinstance(tax_expiration_behavior, dict):
+            behavior_tested = tax_expiration_behavior.get(
+                "tested",
+                False,
+            )
+
+            behavior_status = tax_expiration_behavior.get(
+                "status",
+            )
+
+            if behavior_tested:
+                print(
+                    "Expiration behavior: "
+                    f"{tax_expiration_behavior.get('behavior')}"
+                )
+
+                print(
+                    "Expiration test status: "
+                    f"{behavior_status}"
+                )
+
+                print(
+                    "State before/after: "
+                    f"{tax_expiration_behavior.get('before_state')} / "
+                    f"{tax_expiration_behavior.get('after_state')}"
+                )
+
+                print(
+                    "BUY tax getter before/after: "
+                    f"{tax_expiration_behavior.get('before_buy_tax')} / "
+                    f"{tax_expiration_behavior.get('after_buy_tax')}"
+                )
+
+                print(
+                    "SELL tax getter before/after: "
+                    f"{tax_expiration_behavior.get('before_sell_tax')} / "
+                    f"{tax_expiration_behavior.get('after_sell_tax')}"
+                )
+
+                for phase in ("before", "after"):
+                    details = tax_expiration_behavior.get(
+                        f"{phase}_swap_details",
+                        {},
+                    )
+                    if isinstance(details, dict):
+                        buy = details.get("buy", {})
+                        sell = details.get("sell", {})
+                        print(
+                            f"Router swaps {phase} expiration: "
+                            f"BUY={'PASS' if buy.get('success') else 'FAIL'} "
+                            f"({buy.get('tx_hash') or 'no tx'}), "
+                            f"SELL={'PASS' if sell.get('success') else 'FAIL'} "
+                            f"({sell.get('tx_hash') or 'no tx'})"
+                        )
+
+                if behavior_status == "INCONCLUSIVE":
+                    print(
+                        "Expiration test reason: "
+                        f"{tax_expiration_behavior.get('reason')}"
+                    )
+                    getter_errors = tax_expiration_behavior.get(
+                        "getter_errors",
+                        {},
+                    )
+                    if getter_errors:
+                        for function_name, error in getter_errors.items():
+                            print(
+                                f"Fork getter {function_name} error: {error}"
+                            )
+
+            elif behavior_status in ("ERROR", "INCONCLUSIVE"):
+                print(
+                    f"Expiration behavior test {behavior_status.lower()}: "
+                    f"{tax_expiration_behavior.get('reason')}"
+                )
+
+            elif behavior_status == "SKIPPED":
+                print(
+                    "Expiration behavior test: SKIPPED "
+                    f"({tax_expiration_behavior.get('reason')})"
+                )
+
         print_warnings(
             tax_analysis
         )
@@ -1626,24 +1825,23 @@ def analyze_ownership_section(
             ownership_analysis
         )
 
-        print(
-            f"Current owner: "
-            f"{ownership_analysis.get('owner')}"
-        )
+        owner_value = ownership_analysis.get("owner")
+        renounced_value = ownership_analysis.get("ownership_renounced")
+        print(f"Current owner: {owner_value or 'UNKNOWN'}")
 
         print(
             f"Ownership renounced: "
-            f"{ownership_analysis.get('ownership_renounced')}"
+            f"{'YES' if renounced_value is True else 'NO' if renounced_value is False else 'UNKNOWN'}"
         )
 
         print(
-            f"Can transfer ownership: "
-            f"{ownership_analysis.get('can_transfer_ownership')}"
+            f"Transfer function detected (not caller permission): "
+            f"{ownership_analysis.get('transfer_function_detected')}"
         )
 
         print(
-            f"Can renounce ownership: "
-            f"{ownership_analysis.get('can_renounce_ownership')}"
+            f"Renounce function detected (not caller permission): "
+            f"{ownership_analysis.get('renounce_function_detected')}"
         )
 
         print_warnings(
@@ -2337,6 +2535,7 @@ def analyze_deep_swap_section(
     token_address,
     liquidity,
     holders,
+    check_address=None,
 ):
 
     print_section(
@@ -2386,6 +2585,7 @@ def analyze_deep_swap_section(
             liquidity,
             holders,
             deep=True,
+            check_address=check_address,
         )
 
         print_analysis_header(
@@ -2555,6 +2755,19 @@ def analyze_deep_swap_section(
                         f"{test.get('error')}"
                     )
 
+        wallet_sell_test = swap_simulation.get(
+            "wallet_specific_sell_test"
+        )
+        if isinstance(wallet_sell_test, dict):
+            print()
+            print("Wallet-specific router SELL test")
+            print(f"  Wallet: {wallet_sell_test.get('address')}")
+            print(f"  Status: {wallet_sell_test.get('status')}")
+            print(f"  Balance raw: {wallet_sell_test.get('balance')}")
+            print(f"  Amount raw: {wallet_sell_test.get('amount_in')}")
+            if wallet_sell_test.get("error"):
+                print(f"  Detail: {wallet_sell_test.get('error')}")
+
         print_warnings(
             swap_simulation
         )
@@ -2605,11 +2818,16 @@ def analyze_deep_swap_section(
 
 def scan_token(
     token_address,
+    expected_name=None,
+    expected_symbol=None,
+    check_address=None,
 ):
 
     token_address = Web3.to_checksum_address(
         token_address
     )
+    if check_address:
+        check_address = Web3.to_checksum_address(check_address)
 
     print()
     print(
@@ -2648,13 +2866,15 @@ def scan_token(
     try:
 
         liquidity = analyze_liquidity(
-            token_address
+            token_address,
+            deep_scan=DEEP_SCAN,
         )
 
     except Exception as e:
 
         liquidity = {
             "found": False,
+            "analysis_status": "UNAVAILABLE",
             "dex": None,
             "version": None,
             "pair": None,
@@ -2670,7 +2890,7 @@ def scan_token(
             "total_liquidity_usd": 0,
             "pool_count": 0,
             "pools": [],
-            "risk": "HIGH",
+            "risk": "UNKNOWN",
             "reason": (
                 f"Liquidity analysis failed: {e}"
             ),
@@ -2759,13 +2979,32 @@ def scan_token(
         token_address
     )
 
+    implementation_abi = None
+    implementation_address = (
+        proxy_info.get("implementation")
+        if isinstance(proxy_info, dict)
+        else None
+    )
+    if implementation_address:
+        try:
+            implementation_abi = get_abi(implementation_address)
+        except Exception:
+            implementation_abi = None
+
+    # A proxy dispatches calls through its implementation. When the proxy
+    # address has no explorer ABI, use the verified implementation ABI for
+    # function analysis while still calling the proxy address on-chain.
+    analysis_abi = _merge_abis(token_abi, implementation_abi)
+    combined_analysis_abi = analysis_abi
+
     # =====================================================
     # TAX
     # =====================================================
 
     tax_analysis = analyze_tax_section(
         token_address,
-        token_abi,
+        analysis_abi,
+        liquidity,
     )
 
     # =====================================================
@@ -2775,9 +3014,60 @@ def scan_token(
     ownership_analysis = (
         analyze_ownership_section(
             token_address,
-            token_abi,
+            analysis_abi,
         )
     )
+
+    token_identity = analyze_token_identity(
+        token_address,
+        abi=combined_analysis_abi,
+        expected_name=expected_name,
+        expected_symbol=expected_symbol,
+        proxy=proxy_info,
+    )
+
+    print_section(
+        "TOKEN IDENTITY / IMPERSONATION REVIEW",
+        "🏷️",
+    )
+    print(f"On-chain name: {token_identity.get('name') or 'UNAVAILABLE'}")
+    print(f"On-chain symbol: {token_identity.get('symbol') or 'UNAVAILABLE'}")
+    print(f"Expected name comparison: {token_identity['name_comparison']['status']}")
+    print(f"Expected symbol comparison: {token_identity['symbol_comparison']['status']}")
+    for warning in token_identity.get("warnings", []):
+        print(f"⚠️ {warning}")
+
+    admin_control_audit = analyze_admin_controls(
+        token_address,
+        abi=combined_analysis_abi,
+        ownership=ownership_analysis,
+        proxy=proxy_info,
+        bytecode_report=bytecode_report,
+        check_address=check_address,
+    )
+
+    print_section(
+        "ADMIN CONTROL / FUTURE SELL-RISK REVIEW",
+        "🛡️",
+    )
+    print(f"Status: {admin_control_audit['status']}")
+    detected_control_groups = [
+        group
+        for group, functions in admin_control_audit.get("controls", {}).items()
+        if functions
+    ]
+    print(
+        "Detected control groups: "
+        + (", ".join(detected_control_groups) or "none recognized")
+    )
+    print(f"Role/admin functions: {', '.join(admin_control_audit['role_functions']) or 'none recognized'}")
+    print(f"Authorization: {admin_control_audit['authorization']}")
+    if admin_control_audit.get("address_check"):
+        print(f"Checked wallet: {check_address}")
+        for getter, value in admin_control_audit["address_check"]["results"].items():
+            print(f"{getter}: {value}")
+    for warning in admin_control_audit.get("warnings", []):
+        print(f"⚠️ {warning}")
 
     # =====================================================
     # TRADING RESTRICTIONS
@@ -2786,7 +3076,7 @@ def scan_token(
     trading_restrictions = (
         analyze_trading_restrictions_section(
             token_address,
-            token_abi,
+            analysis_abi,
             ownership_analysis,
         )
     )
@@ -2798,7 +3088,7 @@ def scan_token(
     supply_analysis = (
         analyze_supply_section(
             token_address,
-            token_abi,
+            analysis_abi,
             ownership_analysis,
         )
     )
@@ -2927,7 +3217,7 @@ def scan_token(
     trade_safety = (
         analyze_trade_safety_section(
             token_address,
-            token_abi,
+            analysis_abi,
             tax_analysis,
         )
     )
@@ -2962,6 +3252,7 @@ def scan_token(
             token_address,
             liquidity,
             holders,
+            check_address=check_address,
         )
     )
 
@@ -2985,11 +3276,15 @@ def scan_token(
             trade_safety=trade_safety,
             trade_simulation=simulation,
             honeypot=honeypot,
+            swap_simulation=swap_simulation,
             tax_analysis=tax_analysis,
             ownership=ownership_analysis,
             trading_limits=trading_restrictions,
             proxy_info=proxy_info,
             implementation_info=implementation_info,
+            admin_control_audit=admin_control_audit,
+            token_identity=token_identity,
+            abi_available=token_abi is not None,
         )
 
     except Exception as e:
@@ -2997,6 +3292,10 @@ def scan_token(
         overall = {
             "score": 100,
             "risk": "HIGH",
+            "score_band": "HIGH",
+            "assessment": "INCONCLUSIVE",
+            "coverage_confidence": "LOW",
+            "unresolved_checks": ["overall risk calculation failed"],
             "warnings": [
                 f"Overall risk calculation failed: {e}"
             ],
@@ -3087,6 +3386,13 @@ def scan_token(
         dict,
     ):
 
+        for finding in (
+            admin_control_audit.get("warnings", [])
+            + token_identity.get("warnings", [])
+        ):
+            if finding not in overall.setdefault("warnings", []):
+                overall["warnings"].append(finding)
+
         warnings = overall.get(
             "warnings",
             []
@@ -3124,14 +3430,30 @@ def scan_token(
     # =====================================================
 
     print(
-        f"Risk score: "
-        f"{overall.get('score', 100)}/100"
+        f"Risk score: {overall.get('score', 100)}/100 "
+        f"(score band {overall.get('score_band', overall.get('risk', 'HIGH'))})"
     )
 
-    print(
-        f"Overall risk: "
-        f"{overall.get('risk', 'HIGH')}"
-    )
+    if overall.get("assessment"):
+        print(
+            f"Overall assessment: {overall.get('assessment')} "
+            f"(coverage confidence {overall.get('coverage_confidence', 'LOW')})"
+        )
+        for unresolved in overall.get("unresolved_checks", []):
+            print(f"  Unavailable: {unresolved}")
+    else:
+        print(f"Overall assessment: {overall.get('risk', 'HIGH')}")
+
+    score_band = str(overall.get("score_band", overall.get("risk", "UNKNOWN"))).upper()
+    assessment = str(overall.get("assessment", "")).upper()
+    if score_band in ("CRITICAL", "HIGH"):
+        print("Beginner guidance: Avoid buying this token based on this scan; investigate the listed risks first.")
+    elif assessment in ("INCONCLUSIVE", "LIMITED"):
+        print("Beginner guidance: This scan could not verify important safety checks. Do not treat the token as safe.")
+    else:
+        print("Beginner guidance: This scan is not a guarantee of safety; verify the evidence before making a decision.")
+    print("RobinShield reports risk; it does not execute or block trades on external wallets or exchanges.")
+    print("The risk score is a severity score from detected evidence, not the probability that a token is a scam.")
 
     breakdown = overall.get(
         "breakdown",
@@ -3171,10 +3493,7 @@ def scan_token(
                 f"- {name}: +{value}"
             )
 
-        print(
-            f"- TOTAL: "
-            f"+{overall.get('score', 0)}"
-        )
+        print(f"- CAPPED SCORE (0–100): {overall.get('score', 0)}")
 
     warnings = overall.get(
         "warnings",
@@ -3221,6 +3540,156 @@ def scan_token(
     )
 
 
+    holder_snapshot = {
+        "source": (
+            holders.get("_source")
+            if isinstance(holders, dict)
+            else None
+        ),
+        "verified": bool(
+            holders.get("_verified", False)
+            if isinstance(holders, dict)
+            else False
+        ),
+        "complete": bool(
+            holders.get("_complete", False)
+            if isinstance(holders, dict)
+            else False
+        ),
+        "candidate_count": (
+            holders.get("_candidate_count")
+            if isinstance(holders, dict)
+            else None
+        ),
+        "holder_count": (
+            holders.get("_holder_count")
+            if isinstance(holders, dict)
+            else 0
+        ),
+        "records": (
+            holders.get("items", [])
+            if isinstance(holders, dict)
+            else []
+        ),
+        "risk": holder_risk,
+    }
+
+    return {
+        "schema_version": 1,
+        "generated_at_utc": datetime.now(
+            timezone.utc
+        ).isoformat().replace(
+            "+00:00",
+            "Z",
+        ),
+        "network": {
+            "name": "Robinhood Chain",
+            "chain_id": 4663,
+        },
+        "token_address": token_address,
+        "verification": {
+            "token_abi_available": token_abi is not None,
+            "implementation_abi_available": implementation_abi is not None,
+            "implementation_source_reported_verified": (
+                implementation_info.get("verified")
+                if isinstance(implementation_info, dict)
+                else None
+            ),
+            "meaning": "Explorer source/ABI availability is not a safety guarantee; behavior and sellability are assessed separately and remain limited to the checks performed.",
+        },
+        "token_identity": token_identity,
+        "mode": "deep" if DEEP_SCAN else "normal",
+        "analyses": {
+            "liquidity": liquidity,
+            "lp_safety": lp_safety,
+            "holder_distribution": holder_snapshot,
+            "contract_security": contract_security,
+            "bytecode": bytecode_report,
+            "proxy": proxy_info,
+            "implementation": implementation_info,
+            "tax": tax_analysis,
+            "ownership": ownership_analysis,
+            "trading_restrictions": trading_restrictions,
+            "admin_control_audit": admin_control_audit,
+            "supply": supply_analysis,
+            "initial_distribution": initial_distribution,
+            "trade_safety": trade_safety,
+            "trade_simulation": simulation,
+            "honeypot": honeypot,
+            "deep_swap_simulation": swap_simulation,
+        },
+        "overall": overall,
+    }
+
+
+def _json_default(value):
+
+    if isinstance(
+        value,
+        (bytes, bytearray, memoryview),
+    ):
+
+        return "0x" + bytes(value).hex()
+
+    if hasattr(
+        value,
+        "hex",
+    ) and callable(
+        value.hex
+    ):
+
+        try:
+
+            return value.hex()
+
+        except Exception:
+
+            pass
+
+    return str(value)
+
+
+def write_json_report(
+    report,
+    output_path,
+):
+
+    output_path = os.path.abspath(
+        os.path.expanduser(
+            output_path
+        )
+    )
+
+    output_directory = os.path.dirname(
+        output_path
+    )
+
+    os.makedirs(
+        output_directory,
+        exist_ok=True,
+    )
+
+    with open(
+        output_path,
+        "w",
+        encoding="utf-8",
+    ) as output_file:
+
+        json.dump(
+            report,
+            output_file,
+            indent=2,
+            sort_keys=True,
+            default=_json_default,
+        )
+
+        output_file.write(
+            "\n"
+        )
+
+    return output_path
+
+
 # =========================================================
 # ENTRY POINT
 # =========================================================
@@ -3234,11 +3703,91 @@ def main():
         in arguments
     )
 
-    token_arguments = [
-        argument
-        for argument in arguments
-        if argument != "--deep"
-    ]
+    token_arguments = []
+    json_output = None
+    expected_name = None
+    expected_symbol = None
+    check_address = None
+    index = 0
+
+    while index < len(
+        arguments
+    ):
+
+        argument = arguments[index]
+
+        if argument == "--deep":
+
+            index += 1
+            continue
+
+        if argument in (
+            "--json-output",
+            "--json-out",
+        ):
+
+            if index + 1 >= len(
+                arguments
+            ):
+
+                print(
+                    f"❌ {argument} requires a file path."
+                )
+
+                sys.exit(1)
+
+            json_output = arguments[
+                index + 1
+            ]
+
+            index += 2
+            continue
+
+        if argument in ("--expect-name", "--expect-symbol", "--check-address"):
+            if index + 1 >= len(arguments):
+                print(f"❌ {argument} requires a value.")
+                sys.exit(1)
+            if argument == "--expect-name":
+                expected_name = arguments[index + 1]
+            elif argument == "--expect-symbol":
+                expected_symbol = arguments[index + 1]
+            else:
+                check_address = arguments[index + 1]
+            index += 2
+            continue
+
+        if argument.startswith("--expect-name="):
+            expected_name = argument.split("=", 1)[1]
+            index += 1
+            continue
+
+        if argument.startswith("--expect-symbol="):
+            expected_symbol = argument.split("=", 1)[1]
+            index += 1
+            continue
+
+        if argument.startswith("--check-address="):
+            check_address = argument.split("=", 1)[1]
+            index += 1
+            continue
+
+        if argument.startswith(
+            "--json-output="
+        ):
+
+            json_output = argument.split(
+                "=",
+                1,
+            )[1]
+
+            index += 1
+            continue
+
+        token_arguments.append(
+            argument
+        )
+
+        index += 1
 
     if len(
         token_arguments
@@ -3254,6 +3803,18 @@ def main():
 
         print(
             "python3 scanner.py <TOKEN_ADDRESS> --deep"
+        )
+
+        print(
+            "python3 scanner.py <TOKEN_ADDRESS> --json-output <FILE>"
+        )
+
+        print(
+            "python3 scanner.py <TOKEN_ADDRESS> --expect-name <NAME> --expect-symbol <SYMBOL>"
+        )
+
+        print(
+            "python3 scanner.py <TOKEN_ADDRESS> --check-address <WALLET_ADDRESS>"
         )
 
         sys.exit(1)
@@ -3282,9 +3843,24 @@ def main():
 
     try:
 
-        scan_token(
-            checksum_token
+        report = scan_token(
+            checksum_token,
+            expected_name=expected_name,
+            expected_symbol=expected_symbol,
+            check_address=check_address,
         )
+
+        if json_output:
+
+            output_path = write_json_report(
+                report,
+                json_output,
+            )
+
+            print()
+            print(
+                f"JSON report saved: {output_path}"
+            )
 
     except KeyboardInterrupt:
 

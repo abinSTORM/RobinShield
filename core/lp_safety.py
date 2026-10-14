@@ -304,57 +304,23 @@ def calculate_lp_safety(
         * 100
     )
 
-    burn_percentage = round(
-        burn_percentage,
-        4,
+    # Burn is only one LP disposition. Remaining LP can be held by
+    # legitimate lockers, multisigs, or ordinary wallets; without holder
+    # and locker analysis we cannot call it unlocked or classify safety.
+    safety = "UNKNOWN"
+    reason = (
+        f"{burn_percentage}% of LP tokens are at recognized burn addresses. "
+        "The remaining LP tokens may be locked or unlocked; lock status "
+        "was not verified."
     )
-
-    # -----------------------------------------------------
-    # SAFETY CLASSIFICATION
-    # -----------------------------------------------------
-
-    if burn_percentage >= 99:
-
-        safety = "VERY HIGH"
-
-        reason = (
-            "Almost all LP tokens are permanently held "
-            "by known burn addresses."
-        )
-
-    elif burn_percentage >= 90:
-
-        safety = "HIGH"
-
-        reason = (
-            "Most LP tokens are held by known burn addresses."
-        )
-
-    elif burn_percentage >= 50:
-
-        safety = "MEDIUM"
-
-        reason = (
-            "A significant portion of LP tokens is "
-            "held by known burn addresses."
-        )
-
-    else:
-
-        safety = "LOW"
-
-        reason = (
-            "A large portion of LP tokens remains "
-            "outside known burn addresses."
-        )
 
     # -----------------------------------------------------
     # SIGNALS
     # -----------------------------------------------------
 
     signals = [
-        "LP burn balances were read directly from "
-        "the LP token contract.",
+        "LP burn balances were read directly from the LP token contract.",
+        "Burn percentage does not establish whether remaining LP is locked.",
     ]
 
     zero_balance = burn_balances.get(

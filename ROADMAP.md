@@ -24,7 +24,7 @@
 
 - Telegram Bot
 - Web Dashboard
-- REST API
+- REST API ✅
 
 ---
 

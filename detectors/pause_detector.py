@@ -31,6 +31,6 @@ def scan(functions):
     return create_report(
         "Pause Functions",
         "PASS",
-        "HIGH",
-        "No pause-related functions detected."
+        "LOW",
+        "No recognized pause functions were found in the ABI; custom or obfuscated transfer controls may not be detected."
     )

@@ -9,9 +9,14 @@ TRADING_STATE_FUNCTIONS = [
     "tradingOpen",
     "isTradingEnabled",
     "isTradingOpen",
-    "openTrading",
-    "enableTrading",
     "tradingActive",
+]
+
+TRADING_CONTROL_FUNCTIONS = [
+    "disableTrading", "setTradingEnabled", "setTradingOpen",
+    "setTradingActive", "closeTrading",
+    "stopTrading", "pauseTrading", "pauseTransfers",
+    "disableTransfers",
 ]
 
 MAX_TX_FUNCTIONS = [
@@ -57,6 +62,48 @@ EXEMPTION_FUNCTIONS = [
     "excludeFromFees",
     "isExcludedFromFees",
     "isFeeExempt",
+]
+
+ADMIN_CONTROL_FUNCTIONS = [
+    "setTradingEnabled",
+    "setTradingOpen",
+    "setTradingActive",
+    "disableTrading",
+    "closeTrading",
+
+    "setMaxTxAmount",
+    "setMaxTransactionAmount",
+    "setMaxBuyAmount",
+    "setMaxSellAmount",
+    "setMaxTransferAmount",
+
+    "setMaxWalletAmount",
+    "setMaxWallet",
+    "setMaxWalletSize",
+    "setMaxHoldingAmount",
+
+    "setCooldown",
+    "setCooldownEnabled",
+    "setTransferDelay",
+    "setTransferDelayEnabled",
+
+    "setLimits",
+    "removeLimits",
+    "setLimitsInEffect",
+    "setLimitsEnabled",
+
+    "excludeFromLimits",
+    "includeInLimits",
+    "excludeFromFees",
+    "includeInFees",
+    "setFeeExempt",
+    "setLimitExempt",
+
+    # Blacklist / whitelist administration
+    "setBlacklistStatus",
+    "setWhitelistedAddresses",
+    "removeWhitelistAddresses",
+    "extendWhitelist",
 ]
 
 
@@ -291,7 +338,9 @@ def analyze_trading_restrictions_bytecode(
         "exemptions": {
             "detected": [],
         },
-
+        "admin_controls": {
+            "detected": [],
+        },
         "warnings": [],
         "signals": [],
     }
@@ -416,6 +465,16 @@ def analyze_trading_restrictions_bytecode(
         EXEMPTION_FUNCTIONS
     )
 
+    admin_controls = _matches_bytecode_function(
+        trading_names + limit_names,
+        ADMIN_CONTROL_FUNCTIONS,
+    )
+    trading_controls = _matches_bytecode_function(
+        trading_names,
+        TRADING_CONTROL_FUNCTIONS,
+    )
+    admin_controls = sorted(set(admin_controls) | set(trading_controls))
+
     result[
         "max_transaction"
     ][
@@ -446,6 +505,18 @@ def analyze_trading_restrictions_bytecode(
         "detected"
     ] = exemptions
 
+    result["admin_controls"]["detected"] = admin_controls
+
+    if admin_controls:
+        result["signals"].append(
+            "Admin-controlled trading restriction selectors detected: "
+            + ", ".join(admin_controls)
+        )
+
+        result["warnings"].append(
+            "Trading restrictions may be adjustable by a privileged account."
+        )
+
     # =====================================================
     # SIGNALS
     # =====================================================
@@ -453,16 +524,14 @@ def analyze_trading_restrictions_bytecode(
     if trading_state:
 
         result["signals"].append(
-            "Trading-state control selectors detected "
-            "in the bytecode: "
+            "Trading-state getter or launch selectors detected in the bytecode: "
             + ", ".join(
                 trading_state
             )
         )
 
-        result["warnings"].append(
-            "Trading state cannot be determined from "
-            "selectors alone."
+        result["signals"].append(
+            "These selector names alone do not establish a way to disable trading or block sells."
         )
 
     if max_tx:
@@ -537,8 +606,7 @@ def analyze_trading_restrictions_bytecode(
         + len(max_wallet)
         + len(cooldown)
     )
-
-    if trading_state:
+    if admin_controls:
 
         result["status"] = "WARNING"
         result["risk"] = "MEDIUM"
@@ -580,6 +648,7 @@ def analyze_trading_restrictions_bytecode(
 def analyze_trading_restrictions(
     token_address,
     abi,
+    ownership_analysis=None,
 ):
 
     # =====================================================
@@ -631,6 +700,10 @@ def analyze_trading_restrictions(
         },
 
         "exemptions": {
+            "detected": [],
+        },
+
+        "admin_controls": {
             "detected": [],
         },
 
@@ -687,7 +760,7 @@ def analyze_trading_restrictions(
     if trading_state:
 
         result["signals"].append(
-            "Trading-state control functionality detected."
+            "Trading-state getter(s) detected; getter names do not themselves change trading availability."
         )
 
     # =====================================================
@@ -869,6 +942,110 @@ def analyze_trading_restrictions(
         "detected"
     ] = exemptions
 
+    admin_controls = find_functions(
+        functions,
+        ADMIN_CONTROL_FUNCTIONS,
+    )
+
+    result["admin_controls"]["detected"] = admin_controls
+
+    if admin_controls:
+
+        result["signals"].append(
+            "Admin-controlled trading restriction functions detected: "
+            + ", ".join(admin_controls)
+        )
+
+        # Check whether the detected admin controls are
+        # backed by an active privileged owner.
+
+        owner = None
+        ownership_renounced = False
+        ownership_known = False
+
+        if isinstance(ownership_analysis, dict):
+
+            owner = ownership_analysis.get(
+                "owner"
+            )
+
+            ownership_renounced = bool(
+                ownership_analysis.get(
+                    "ownership_renounced",
+                    False,
+                )
+            )
+
+            ownership_known = bool(
+                ownership_analysis.get(
+                    "owner_readable",
+                    False,
+                )
+            )
+
+        # -------------------------------------------------
+        # Authorization classification
+        # -------------------------------------------------
+
+        if ownership_renounced:
+
+            result[
+                "authorization"
+            ] = "RENOUNCED"
+
+            result["signals"].append(
+                "Admin-controlled trading functions were detected, "
+                "but ownership appears to be renounced."
+            )
+
+        elif ownership_known and owner:
+
+            result[
+                "authorization"
+            ] = "ACTIVE_OWNER"
+
+            result["warnings"].append(
+                "Active owner detected together with "
+                "admin-controlled trading restriction functions."
+            )
+
+            result["signals"].append(
+                "Privileged owner may control trading restrictions: "
+                + str(owner)
+            )
+
+        elif ownership_known:
+
+            result[
+                "authorization"
+            ] = "UNKNOWN_OWNER"
+
+            result["warnings"].append(
+                "Admin-controlled trading restrictions were detected, "
+                "but no active privileged owner was confirmed."
+            )
+
+            result["signals"].append(
+                "Trading restriction authorization could not be "
+                "confirmed from the current ownership state."
+            )
+
+        else:
+
+            result[
+                "authorization"
+            ] = "UNKNOWN"
+
+            result["warnings"].append(
+                "Admin-controlled trading restrictions were detected, "
+                "but privileged ownership could not be confirmed."
+            )
+
+            result["signals"].append(
+                "Trading restriction authorization could not be "
+                "determined."
+            )
+
     if exemptions:
 
         result["signals"].append(
@@ -887,6 +1064,7 @@ def analyze_trading_restrictions(
         + len(max_wallet)
         + len(cooldown)
     )
+    mutable_trading_surface = bool(admin_controls)
 
     disabled_trading = any(
         value is False
@@ -908,6 +1086,24 @@ def analyze_trading_restrictions(
         result["status"] = "WARNING"
         result["risk"] = "MEDIUM"
         result["confidence"] = "MEDIUM"
+
+    elif mutable_trading_surface:
+
+        # A live trading-state getter can be true while the contract still
+        # exposes controls that may alter trading later. Surface this as a
+        # warning; the ABI alone does not establish who is authorized.
+        result["status"] = "WARNING"
+        result["risk"] = (
+            "MEDIUM"
+            if result.get("authorization") == "ACTIVE_OWNER"
+            else "LOW"
+        )
+        result["confidence"] = "MEDIUM"
+        result["warnings"].append(
+            "Trading-state or admin-control functions are present. "
+            "Current trading status does not prove these controls are "
+            "disabled or establish who can call them."
+        )
 
     elif restriction_count > 0:
 

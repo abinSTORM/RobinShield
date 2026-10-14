@@ -232,9 +232,9 @@ def analyze_ownership_bytecode(
 
         "ownership_renounced": None,
 
-        "can_transfer_ownership": False,
+        "transfer_function_detected": False,
 
-        "can_renounce_ownership": False,
+        "renounce_function_detected": False,
 
         "admin_functions": [],
 
@@ -344,11 +344,11 @@ def analyze_ownership_bytecode(
     )
 
     result[
-        "can_transfer_ownership"
+        "transfer_function_detected"
     ] = has_transfer
 
     result[
-        "can_renounce_ownership"
+        "renounce_function_detected"
     ] = has_renounce
 
     # -----------------------------------------------------
@@ -463,11 +463,11 @@ def analyze_ownership(
 
         "owner_readable": False,
 
-        "ownership_renounced": False,
+        "ownership_renounced": None,
 
-        "can_transfer_ownership": False,
+        "transfer_function_detected": False,
 
-        "can_renounce_ownership": False,
+        "renounce_function_detected": False,
 
         "admin_functions": [],
 
@@ -528,11 +528,11 @@ def analyze_ownership(
             break
 
     result[
-        "can_transfer_ownership"
+        "transfer_function_detected"
     ] = transfer_function is not None
 
     result[
-        "can_renounce_ownership"
+        "renounce_function_detected"
     ] = renounce_function is not None
 
     # =====================================================
@@ -710,15 +710,19 @@ def analyze_ownership(
         # Stronger risk if an active owner exists
         # together with powerful admin controls.
 
-        if result["owner_readable"]:
+        if (
+            result["owner_readable"]
+            and result.get("owner")
+            and result["owner"].lower() != ZERO_ADDRESS.lower()
+        ):
 
-            result["risk"] = "HIGH"
+            result["risk"] = "MEDIUM"
 
-            result["confidence"] = "HIGH"
+            result["confidence"] = "LOW"
 
             result["warnings"].append(
-                "An active owner appears to have "
-                "administrative control functions."
+                "A non-zero owner and administrative functions were found, "
+                "but whether that owner can call each function was not verified."
             )
 
     else:

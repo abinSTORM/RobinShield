@@ -1,9 +1,23 @@
 from web3 import Web3
+from concurrent.futures import ThreadPoolExecutor
+import json
+import os
+import threading
+
 import requests
 
 from config import RPC_URL
 from core.token import get_token_decimals
-from core.price import get_eth_price_usd
+try:
+    from core.price import (
+        get_eth_price_usd,
+        get_token_price_usd,
+    )
+except ImportError:
+    from core.price import get_eth_price_usd
+
+    def get_token_price_usd(token_address):
+        return None
 from core.lp import V2_FACTORY_ABI, PAIR_ABI
 
 
@@ -17,6 +31,10 @@ V3_FACTORY = "0x1f7d7550B1b028f7571E69A784071F0205FD2EfA"
 
 WETH = "0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73"
 
+ROBINHOOD_QUOTE_TOKEN = (
+    "0x1b0E319c6A659F002271B69dB8A7df2F911c153E"
+)
+
 ZERO_ADDRESS = "0x0000000000000000000000000000000000000000"
 
 DEXSCREENER_CHAIN = "robinhood"
@@ -27,6 +45,9 @@ V3_FEE_TIERS = [
     3000,
     10000,
 ]
+
+V2_EVENT_LOG_BATCH_SIZE = 20
+V2_EVENT_LOG_WORKERS = 8
 
 
 # =========================================================
@@ -227,8 +248,8 @@ def _liquidity_risk_from_usd(liquidity_usd):
     if liquidity_usd <= 0:
 
         return (
-            "NONE",
-            "Pool exists but currently has no usable liquidity.",
+            "UNKNOWN",
+            "Pool exists and reserves were verified, but USD valuation is unavailable for the quote token.",
         )
 
     if liquidity_usd < 1000:
@@ -286,8 +307,15 @@ def _liquidity_risk(liquidity_eth):
 
 def _empty_result(reason):
 
+    reason_text = str(reason or "")
+    unavailable = any(
+        marker in reason_text.lower()
+        for marker in ("rpc", "connect", "connection", "timed out", "timeout")
+    )
+
     return {
         "found": False,
+        "analysis_status": "UNAVAILABLE" if unavailable else "COMPLETE",
 
         "dex": None,
         "version": None,
@@ -315,10 +343,11 @@ def _empty_result(reason):
         "total_liquidity_eth": 0,
 
         "liquidity_usd": 0,
+
         "total_discovered_liquidity_usd": 0,
         "total_liquidity_usd": 0,
 
-        "risk": "NONE",
+        "risk": "UNKNOWN" if unavailable else "NONE",
         "reason": reason,
 
         "pools": [],
@@ -329,10 +358,182 @@ def _empty_result(reason):
 # V2 POOL DISCOVERY
 # =========================================================
 
+def _get_v2_pair_event_log_results(
+    w3,
+    filters,
+):
+
+    results = [
+        None
+        for _ in filters
+    ]
+
+    fallback_indices = []
+
+    provider = getattr(
+        w3,
+        "provider",
+        None,
+    )
+
+    batch_method = getattr(
+        provider,
+        "make_batch_request",
+        None,
+    )
+
+    for start in range(
+        0,
+        len(filters),
+        V2_EVENT_LOG_BATCH_SIZE,
+    ):
+
+        batch_filters = filters[
+            start:start + V2_EVENT_LOG_BATCH_SIZE
+        ]
+
+        responses = None
+
+        if callable(
+            batch_method
+        ):
+
+            try:
+
+                responses = batch_method(
+                    [
+                        (
+                            "eth_getLogs",
+                            [query],
+                        )
+                        for query in batch_filters
+                    ]
+                )
+
+                if not isinstance(
+                    responses,
+                    list,
+                ) or len(responses) != len(
+                    batch_filters
+                ):
+
+                    responses = None
+
+            except Exception:
+
+                responses = None
+
+        for index, query in enumerate(
+            batch_filters
+        ):
+
+            result_index = start + index
+
+            response = (
+                responses[index]
+                if responses is not None
+                else None
+            )
+
+            if (
+                isinstance(
+                    response,
+                    dict,
+                )
+                and not response.get(
+                    "error"
+                )
+                and isinstance(
+                    response.get(
+                        "result"
+                    ),
+                    list,
+                )
+            ):
+
+                results[result_index] = (
+                    (
+                        response["result"],
+                        True,
+                    )
+                )
+
+                continue
+
+            fallback_indices.append(
+                result_index
+            )
+
+    if fallback_indices:
+
+        thread_state = threading.local()
+
+        def fetch_logs(query):
+
+            worker_w3 = getattr(
+                thread_state,
+                "w3",
+                None,
+            )
+
+            if worker_w3 is None:
+
+                worker_w3 = Web3(
+                    Web3.HTTPProvider(
+                        RPC_URL,
+                        request_kwargs={
+                            "timeout": 15,
+                        },
+                    )
+                )
+
+                thread_state.w3 = worker_w3
+
+            try:
+
+                return (
+                    worker_w3.eth.get_logs(
+                        query
+                    ),
+                    True,
+                )
+
+            except Exception:
+
+                return (
+                    [],
+                    False,
+                )
+
+        with ThreadPoolExecutor(
+            max_workers=min(
+                V2_EVENT_LOG_WORKERS,
+                len(fallback_indices),
+            )
+        ) as executor:
+
+            fallback_results = executor.map(
+                fetch_logs,
+                [
+                    filters[index]
+                    for index in fallback_indices
+                ],
+            )
+
+            for index, result in zip(
+                fallback_indices,
+                fallback_results,
+            ):
+
+                results[index] = result
+
+    return results
+
 def find_v2_pair(
     token_address,
     quote_address=WETH,
     w3=None,
+    allow_event_scan=True,
 ):
 
     if w3 is None:
@@ -347,25 +548,391 @@ def find_v2_pair(
         quote_address
     )
 
+    factory_address = Web3.to_checksum_address(
+        V2_FACTORY
+    )
+
     factory = w3.eth.contract(
-        address=Web3.to_checksum_address(
-            V2_FACTORY
-        ),
+        address=factory_address,
         abi=V2_FACTORY_ABI,
     )
 
-    pair = factory.functions.getPair(
-        token_address,
-        quote_address,
-    ).call()
+    # =====================================================
+    # 1. EXACT PAIR LOOKUP
+    # =====================================================
 
-    if _is_zero_address(pair):
+    try:
+
+        pair = factory.functions.getPair(
+            token_address,
+            quote_address,
+        ).call()
+
+        if not _is_zero_address(
+            pair
+        ):
+
+            return Web3.to_checksum_address(
+                pair
+            )
+
+    except Exception:
+
+        pass
+
+    if not allow_event_scan:
+        return None
+
+    # =====================================================
+    # 2. FALLBACK FOR WETH LOOKUP
+    #
+    # If token/WETH does not exist, search PairCreated
+    # events for any V2 pair containing this token.
+    # =====================================================
+
+    if (
+        quote_address.lower()
+        != WETH.lower()
+    ):
 
         return None
 
-    return Web3.to_checksum_address(
-        pair
-    )
+    try:
+
+        event_topic = Web3.keccak(
+            text=(
+                "PairCreated("
+                "address,address,address,uint256"
+                ")"
+            )
+        ).hex()
+
+        token_topic = (
+            "0x"
+            + token_address[
+                2:
+            ].lower().rjust(
+                64,
+                "0",
+            )
+        )
+
+        latest_block = int(
+            w3.eth.block_number
+        )
+
+        chunk_size = 1_000_000
+
+        cache_path = os.path.join(
+            os.path.dirname(
+                os.path.dirname(
+                    os.path.abspath(__file__)
+                )
+            ),
+            ".cache",
+            "liquidity",
+            "v2_pair_event_scans",
+            f"{token_address.lower()}.json",
+        )
+
+        scan_from = 0
+        cached_candidates = []
+
+        try:
+
+            with open(
+                cache_path,
+                "r",
+                encoding="utf-8",
+            ) as cache_file:
+
+                cached_scan = json.load(
+                    cache_file
+                )
+
+            cached_through = int(
+                cached_scan.get(
+                    "scanned_through",
+                    -1,
+                )
+            )
+
+            for candidate in cached_scan.get(
+                "candidates",
+                [],
+            ):
+
+                try:
+
+                    cached_candidates.append(
+                        (
+                            int(
+                                candidate[
+                                    "block_number"
+                                ]
+                            ),
+                            Web3.to_checksum_address(
+                                candidate[
+                                    "pair_address"
+                                ]
+                            ),
+                        )
+                    )
+
+                except Exception:
+
+                    continue
+
+            if 0 <= cached_through <= latest_block:
+
+                scan_from = cached_through + 1
+
+        except Exception:
+
+            pass
+
+        candidates = list(
+            cached_candidates
+        )
+
+        scan_complete = True
+
+        log_filters = []
+
+        current_to = latest_block
+
+        while current_to >= scan_from:
+
+            current_from = max(
+                scan_from,
+                current_to
+                - chunk_size
+                + 1,
+            )
+
+            for topics in (
+                [
+                    event_topic,
+                    token_topic,
+                ],
+                [
+                    event_topic,
+                    None,
+                    token_topic,
+                ],
+            ):
+
+                log_filters.append(
+                    {
+                        "address": factory_address,
+                        "fromBlock": current_from,
+                        "toBlock": current_to,
+                        "topics": topics,
+                    }
+                )
+
+            current_to = (
+                current_from - 1
+            )
+
+        log_results = _get_v2_pair_event_log_results(
+            w3,
+            log_filters,
+        )
+
+        for logs, request_succeeded in log_results:
+
+            if not request_succeeded:
+
+                scan_complete = False
+
+            for log in logs:
+
+                try:
+
+                    data = log.get(
+                        "data",
+                        "",
+                    )
+
+                    if not data:
+
+                        continue
+
+                    data_hex = str(
+                        data
+                    )
+
+                    if data_hex.startswith(
+                        "0x"
+                    ):
+
+                        data_hex = (
+                            data_hex[2:]
+                        )
+
+                    # PairCreated data:
+                    # address pair, uint256 index
+                    if len(
+                        data_hex
+                    ) < 64:
+
+                        continue
+
+                    pair_address = (
+                        "0x"
+                        + data_hex[
+                            24:64
+                        ]
+                    )
+
+                    pair_address = (
+                        Web3.to_checksum_address(
+                            pair_address
+                        )
+                    )
+
+                    block_number = int(
+                        log.get(
+                            "blockNumber",
+                            0,
+                        )
+                    )
+
+                    candidates.append(
+                        (
+                            block_number,
+                            pair_address,
+                        )
+                    )
+
+                except Exception:
+
+                    continue
+
+        # -------------------------------------------------
+        # Newest candidate first.
+        # -------------------------------------------------
+
+        unique = {}
+
+        for block_number, pair_address in candidates:
+
+            unique[
+                pair_address.lower()
+            ] = (
+                block_number,
+                pair_address,
+            )
+
+        candidates = list(
+            unique.values()
+        )
+
+        if scan_complete:
+
+            try:
+
+                os.makedirs(
+                    os.path.dirname(
+                        cache_path
+                    ),
+                    exist_ok=True,
+                )
+
+                temporary_path = (
+                    cache_path + ".tmp"
+                )
+
+                with open(
+                    temporary_path,
+                    "w",
+                    encoding="utf-8",
+                ) as cache_file:
+
+                    json.dump(
+                        {
+                            "scanned_through": latest_block,
+                            "candidates": [
+                                {
+                                    "block_number": block_number,
+                                    "pair_address": pair_address,
+                                }
+                                for block_number, pair_address
+                                in candidates
+                            ],
+                        },
+                        cache_file,
+                    )
+
+                os.replace(
+                    temporary_path,
+                    cache_path,
+                )
+
+            except Exception:
+
+                pass
+
+        candidates = sorted(
+            unique.values(),
+            key=lambda item: item[0],
+            reverse=True,
+        )
+
+        # -------------------------------------------------
+        # Verify candidates directly on-chain.
+        # -------------------------------------------------
+
+        for _, pair_address in candidates:
+
+            try:
+
+                pair_contract = w3.eth.contract(
+                    address=pair_address,
+                    abi=PAIR_ABI,
+                )
+
+                token0 = Web3.to_checksum_address(
+                    pair_contract.functions.token0().call()
+                )
+
+                token1 = Web3.to_checksum_address(
+                    pair_contract.functions.token1().call()
+                )
+
+                if (
+                    token0.lower()
+                    != token_address.lower()
+                    and
+                    token1.lower()
+                    != token_address.lower()
+                ):
+
+                    continue
+
+                reserve0, reserve1, _ = (
+                    pair_contract.functions.getReserves().call()
+                )
+
+                if (
+                    int(reserve0) <= 0
+                    or int(reserve1) <= 0
+                ):
+
+                    continue
+
+                return pair_address
+
+            except Exception:
+
+                continue
+
+    except Exception:
+
+        pass
+
+    return None
 
 
 # =========================================================
@@ -404,10 +971,8 @@ def analyze_v2_pool(
     )
 
     if (
-        token0.lower()
-        != token_address.lower()
-        and token1.lower()
-        != token_address.lower()
+        token0.lower() != token_address.lower()
+        and token1.lower() != token_address.lower()
     ):
 
         return None
@@ -418,7 +983,6 @@ def analyze_v2_pool(
     )
 
     if token_decimals is None:
-
         token_decimals = 18
 
     if token0.lower() == token_address.lower():
@@ -439,7 +1003,6 @@ def analyze_v2_pool(
     )
 
     if quote_decimals is None:
-
         quote_decimals = 18
 
     token_reserve = (
@@ -456,8 +1019,14 @@ def analyze_v2_pool(
     liquidity_eth = 0.0
     liquidity_usd = 0.0
     eth_price_usd = 0.0
+    quote_price_usd = 0.0
 
-    if quote_address.lower() == WETH.lower():
+    if quote_reserve <= 0 or token_reserve <= 0:
+
+        risk = "HIGH"
+        reason = "Pool was found, but one or both token reserves are empty."
+
+    elif quote_address.lower() == WETH.lower():
 
         weth_reserve = quote_reserve
 
@@ -465,32 +1034,60 @@ def analyze_v2_pool(
             weth_reserve * 2
         )
 
-        eth_price_usd = _safe_float(
-            get_eth_price_usd()
-        )
+        try:
+            eth_price_usd = _safe_float(
+                get_eth_price_usd()
+            )
+        except Exception:
+            eth_price_usd = 0.0
 
-        liquidity_usd = (
-            liquidity_eth
-            * eth_price_usd
-        )
+        if eth_price_usd > 0:
 
-        risk, reason = _liquidity_risk(
-            liquidity_eth
-        )
+            liquidity_usd = (
+                liquidity_eth
+                * eth_price_usd
+            )
+
+            risk, reason = _liquidity_risk(
+                liquidity_eth
+            )
+
+        else:
+
+            risk = "UNKNOWN"
+            reason = (
+                "WETH liquidity was verified on-chain, but ETH/USD pricing is unavailable."
+            )
 
     else:
 
-        risk, reason = (
-            _liquidity_risk_from_usd(
-                0
+        try:
+            quote_price_usd = _safe_float(
+                get_token_price_usd(
+                    quote_address
+                )
             )
-        )
+        except Exception:
+            quote_price_usd = 0.0
 
-        reason = (
-            "Non-WETH liquidity pool detected. "
-            "On-chain reserves were verified, but USD "
-            "valuation requires quote-token pricing."
-        )
+        if quote_price_usd > 0:
+
+            liquidity_usd = (
+                quote_reserve
+                * 2
+                * quote_price_usd
+            )
+
+            risk, reason = _liquidity_risk_from_usd(
+                liquidity_usd
+            )
+
+        else:
+
+            risk = "UNKNOWN"
+            reason = (
+                "Non-WETH liquidity pool detected. On-chain reserves were verified, but USD valuation requires quote-token pricing."
+            )
 
     return {
         "found": True,
@@ -522,11 +1119,10 @@ def analyze_v2_pool(
         "quote_decimals": quote_decimals,
 
         "weth_reserve": weth_reserve,
-
         "liquidity_eth": liquidity_eth,
 
         "eth_price_usd": eth_price_usd,
-
+        "quote_price_usd": quote_price_usd,
         "liquidity_usd": liquidity_usd,
 
         "risk": risk,
@@ -600,6 +1196,7 @@ def analyze_v3_pool(
     pool_address,
     fee,
     w3,
+    token_address=None,
 ):
 
     pool_address = Web3.to_checksum_address(
@@ -619,12 +1216,31 @@ def analyze_v3_pool(
         pool.functions.token1().call()
     )
 
+    quote_token = None
+    if token_address:
+        token_checksum = Web3.to_checksum_address(token_address)
+        if token0.lower() == token_checksum.lower():
+            quote_token = token1
+        elif token1.lower() == token_checksum.lower():
+            quote_token = token0
+
     liquidity = _safe_int(
         pool.functions.liquidity().call()
     )
 
     slot0 = (
         pool.functions.slot0().call()
+    )
+
+    liquidity_status = (
+        "ACTIVE_AT_CURRENT_PRICE"
+        if liquidity > 0
+        else "ZERO_AT_CURRENT_PRICE"
+    )
+    reason = (
+        "Uniswap V3 pool detected. Raw V3 liquidity is available but USD liquidity requires price-range analysis."
+        if liquidity > 0
+        else "Uniswap V3 pool reports zero active liquidity at the current price. Out-of-range positions and liquidity reached after price movement were not analyzed."
     )
 
     return {
@@ -644,9 +1260,11 @@ def analyze_v3_pool(
 
         "v3_liquidity": liquidity,
 
+        "active_liquidity_status": liquidity_status,
+
         "sqrt_price_x96": slot0[0],
 
-        "quote_token": None,
+        "quote_token": quote_token,
 
         "token_reserve_raw": None,
         "quote_reserve_raw": None,
@@ -661,17 +1279,22 @@ def analyze_v3_pool(
 
         "liquidity_eth": 0,
 
+        "risk": "UNKNOWN",
+
+        "reason": reason,
+
         "eth_price_usd": 0,
+        "quote_price_usd": 0,
 
         "liquidity_usd": 0,
 
+        # V3 positions can be outside the current tick; the pool's raw
+        # active-liquidity value cannot be converted to USD without range data.
+        "liquidity_usd_status": "NOT_CALCULATED_V3_RANGE_VALUATION",
+
         "risk": "UNKNOWN",
 
-        "reason": (
-            "Uniswap V3 pool detected. "
-            "Raw V3 liquidity is available but "
-            "USD liquidity requires price-range analysis."
-        ),
+        "reason": reason,
 
         "source": "On-chain verification",
     }
@@ -826,11 +1449,9 @@ def verify_discovered_v2_pair(
     )
 
     if not pair_address:
-
         return None
 
     try:
-
         pair_address = Web3.to_checksum_address(
             pair_address
         )
@@ -853,49 +1474,32 @@ def verify_discovered_v2_pair(
         )
 
         if (
-            token0.lower()
-            != token_address.lower()
-            and token1.lower()
-            != token_address.lower()
+            token0.lower() != token_address.lower()
+            and token1.lower() != token_address.lower()
         ):
-
             return None
 
-        if (
-            token0.lower()
-            == token_address.lower()
-        ):
-
+        if token0.lower() == token_address.lower():
             quote_address = token1
-
             token_reserve_raw = reserve0
-
             quote_reserve_raw = reserve1
-
         else:
-
             quote_address = token0
-
             token_reserve_raw = reserve1
-
             quote_reserve_raw = reserve0
 
         token_decimals = get_token_decimals(
             w3,
             token_address,
         )
-
         if token_decimals is None:
-
             token_decimals = 18
 
         quote_decimals = get_token_decimals(
             w3,
             quote_address,
         )
-
         if quote_decimals is None:
-
             quote_decimals = 18
 
         token_reserve = (
@@ -908,59 +1512,114 @@ def verify_discovered_v2_pair(
             / (10 ** quote_decimals)
         )
 
-        liquidity_usd = _safe_float(
-            discovered_pair.get(
-                "liquidity_usd"
-            )
-        )
-
-        risk, reason = (
-            _liquidity_risk_from_usd(
-                liquidity_usd
-            )
-        )
-
         weth_reserve = 0.0
         liquidity_eth = 0.0
         eth_price_usd = 0.0
+        quote_price_usd = 0.0
 
-        if quote_address.lower() == WETH.lower():
+        discovered_liquidity_usd = _safe_float(
+            discovered_pair.get(
+                "liquidity_usd",
+                0,
+            )
+        )
+
+        liquidity_usd = discovered_liquidity_usd
+
+        if quote_reserve <= 0 or token_reserve <= 0:
+
+            risk = "HIGH"
+            reason = "Pair was discovered, but one or both token reserves are empty."
+
+        elif quote_address.lower() == WETH.lower():
 
             weth_reserve = quote_reserve
+            liquidity_eth = weth_reserve * 2
 
-            liquidity_eth = (
-                weth_reserve * 2
-            )
+            try:
+                eth_price_usd = _safe_float(
+                    get_eth_price_usd()
+                )
+            except Exception:
+                eth_price_usd = 0.0
 
-            eth_price_usd = _safe_float(
-                get_eth_price_usd()
-            )
+            if eth_price_usd > 0:
 
-            calculated_usd = (
-                liquidity_eth
-                * eth_price_usd
-            )
-
-            if calculated_usd > 0:
-
-                liquidity_usd = calculated_usd
-
-                risk, reason = (
-                    _liquidity_risk(
-                        liquidity_eth
-                    )
+                liquidity_usd = (
+                    liquidity_eth
+                    * eth_price_usd
                 )
 
-        reason = (
-            reason
-            + " Pool discovered through DexScreener "
-            "and verified on-chain."
-        )
+                risk, reason = _liquidity_risk(
+                    liquidity_eth
+                )
+
+            elif discovered_liquidity_usd > 0:
+
+                risk, reason = _liquidity_risk_from_usd(
+                    discovered_liquidity_usd
+                )
+                reason = (
+                    f"DexScreener reported ${discovered_liquidity_usd:,.2f} liquidity; "
+                    "on-chain WETH reserves were also verified, but live ETH/USD pricing is unavailable."
+                )
+
+            else:
+
+                liquidity_usd = 0.0
+                risk = "UNKNOWN"
+                reason = (
+                    "WETH pair was verified on-chain, but USD valuation is unavailable."
+                )
+
+        else:
+
+            try:
+                quote_price_usd = _safe_float(
+                    get_token_price_usd(
+                        quote_address
+                    )
+                )
+            except Exception:
+                quote_price_usd = 0.0
+
+            if quote_price_usd > 0:
+
+                liquidity_usd = (
+                    quote_reserve
+                    * 2
+                    * quote_price_usd
+                )
+
+                risk, reason = _liquidity_risk_from_usd(
+                    liquidity_usd
+                )
+
+            elif discovered_liquidity_usd > 0:
+
+                liquidity_usd = discovered_liquidity_usd
+                risk, reason = _liquidity_risk_from_usd(
+                    liquidity_usd
+                )
+                reason = (
+                    f"DexScreener reported ${discovered_liquidity_usd:,.2f} liquidity; "
+                    "on-chain reserves were verified, but quote-token pricing is unavailable."
+                )
+
+            else:
+
+                liquidity_usd = 0.0
+                risk = "UNKNOWN"
+                reason = (
+                    "Non-WETH liquidity pool detected. On-chain reserves were verified, but USD valuation requires quote-token pricing."
+                )
 
         return {
             "found": True,
 
-            "dex": "Uniswap V2",
+            "dex": discovered_pair.get(
+                "dex"
+            ) or "Verified V2 Pair",
             "version": "V2",
 
             "pool": pair_address,
@@ -975,7 +1634,6 @@ def verify_discovered_v2_pair(
             "token_reserve_raw": int(
                 token_reserve_raw
             ),
-
             "quote_reserve_raw": int(
                 quote_reserve_raw
             ),
@@ -987,28 +1645,25 @@ def verify_discovered_v2_pair(
             "quote_decimals": quote_decimals,
 
             "weth_reserve": weth_reserve,
-
             "liquidity_eth": liquidity_eth,
 
             "eth_price_usd": eth_price_usd,
+            "quote_price_usd": quote_price_usd,
 
             "liquidity_usd": liquidity_usd,
 
-            "risk": risk,
-
-            "reason": reason,
-
-            "source": (
-                "DexScreener + on-chain verification"
-            ),
-
+            "dexscreener_liquidity_usd": discovered_liquidity_usd,
             "dexscreener_url": discovered_pair.get(
                 "url"
             ),
+
+            "risk": risk,
+            "reason": reason,
+
+            "source": "DexScreener discovery + on-chain verification",
         }
 
     except Exception:
-
         return None
 
 
@@ -1041,12 +1696,24 @@ def select_best_pool(pools):
     )
 
 
+def _pool_identity(pool):
+
+    address = (
+        pool.get("pair_address")
+        or pool.get("pair")
+        or pool.get("pool")
+    )
+
+    return str(address).lower() if address else None
+
+
 # =========================================================
 # MAIN LIQUIDITY ANALYSIS
 # =========================================================
 
 def analyze_liquidity(
     token_address,
+    deep_scan=False,
 ):
 
     try:
@@ -1066,18 +1733,36 @@ def analyze_liquidity(
     pools = []
 
     # =====================================================
-    # 1. UNISWAP V2 WETH
+    # 1. UNISWAP V2 QUOTE TOKENS
     # =====================================================
 
-    try:
+    # Check Robinhood's common quote token first in normal mode. If
+    # it yields a supported pool, avoid scanning the full PairCreated
+    # history just to find less common WETH pools. Deep mode retains
+    # the broader historical discovery pass.
+    v2_quote_tokens = (
+        [WETH, ROBINHOOD_QUOTE_TOKEN]
+        if deep_scan
+        else [ROBINHOOD_QUOTE_TOKEN, WETH]
+    )
 
-        pair = find_v2_pair(
-            token_address,
-            WETH,
-            w3,
-        )
+    for quote_token in v2_quote_tokens:
 
-        if pair:
+        try:
+
+            pair = find_v2_pair(
+                token_address,
+                quote_token,
+                w3,
+                allow_event_scan=(
+                    deep_scan
+                    or not pools
+                ),
+            )
+
+            if not pair:
+
+                continue
 
             result = analyze_v2_pool(
                 token_address,
@@ -1085,16 +1770,18 @@ def analyze_liquidity(
                 w3,
             )
 
-            if result:
+            if not result:
 
-                pools.append(
-                    result
-                )
+                continue
 
-    except Exception:
+            if _pool_identity(result) not in {
+                _pool_identity(pool) for pool in pools
+            }:
+                pools.append(result)
 
-        pass
+        except Exception:
 
+            continue
     # =====================================================
     # 2. UNISWAP V3 WETH
     # =====================================================
@@ -1112,6 +1799,7 @@ def analyze_liquidity(
                 item["pool"],
                 item["fee"],
                 w3,
+                token_address=token_address,
             )
 
             if result:
@@ -1148,34 +1836,42 @@ def analyze_liquidity(
 
             continue
 
-        already_exists = False
+        existing_pool = next(
+            (
+                pool
+                for pool in pools
+                if pair_address
+                and pair_address.lower() == _pool_identity(pool)
+            ),
+            None,
+        )
 
-        for pool in pools:
-
-            existing = (
-                pool.get(
-                    "pair_address"
+        if existing_pool:
+            # Native discovery already verified this V3 pool on-chain. Keep
+            # that result, but enrich its unvalued USD field with the
+            # third-party estimate instead of discarding the duplicate.
+            if existing_pool.get("version") == "V3":
+                discovered_liquidity_usd = _safe_float(
+                    item.get("liquidity_usd", 0)
                 )
-                or pool.get(
-                    "pair"
-                )
-                or pool.get(
-                    "pool"
-                )
-            )
-
-            if (
-                existing
-                and str(existing).lower()
-                == str(pair_address).lower()
-            ):
-
-                already_exists = True
-
-                break
-
-        if already_exists:
-
+                if discovered_liquidity_usd > 0:
+                    existing_pool["liquidity_usd"] = discovered_liquidity_usd
+                    existing_pool["dexscreener_liquidity_usd"] = discovered_liquidity_usd
+                    existing_pool["dexscreener_url"] = item.get("url")
+                    existing_pool["liquidity_usd_status"] = "ESTIMATED_DEXSCREENER"
+                    existing_pool["liquidity_usd_source"] = "DexScreener estimate"
+                    existing_pool["source"] = (
+                        "On-chain V3 pool verification + DexScreener USD estimate"
+                    )
+                    existing_pool["risk"], _ = _liquidity_risk_from_usd(
+                        discovered_liquidity_usd
+                    )
+                    existing_pool["reason"] = (
+                        f"DexScreener estimates ${discovered_liquidity_usd:,.2f} "
+                        "of pool liquidity. V3 active liquidity was verified "
+                        "on-chain; the USD value is a third-party estimate, "
+                        "not an independent position-range calculation."
+                    )
             continue
 
         verified = verify_discovered_v2_pair(
@@ -1293,6 +1989,17 @@ def analyze_liquidity(
             "version"
         ),
 
+        "v3_liquidity": best_pool.get("v3_liquidity"),
+
+        "active_liquidity_status": best_pool.get("active_liquidity_status"),
+
+        "liquidity_usd_status": best_pool.get(
+            "liquidity_usd_status",
+            "CALCULATED",
+        ),
+
+        "liquidity_usd_source": best_pool.get("liquidity_usd_source"),
+
         "pair": pair_address,
 
         "best_pool": pair_address,
@@ -1355,6 +2062,11 @@ def analyze_liquidity(
 
         "eth_price_usd": best_pool.get(
             "eth_price_usd",
+            0,
+        ),
+
+        "quote_price_usd": best_pool.get(
+            "quote_price_usd",
             0,
         ),
 

@@ -6,9 +6,22 @@ TAX_FUNCTIONS = [
     "taxRate",
     "setTax",
     "setTaxes",
+    "setTaxRate",
+    "setTaxRates",
+    "setTaxPercent",
     "updateTaxes",
+    "updateTax",
+    "updateTaxRates",
+    "updateBuyTax",
+    "updateSellTax",
     "setBuyTax",
     "setSellTax",
+    "setFee",
+    "setFees",
+    "setFeeRate",
+    "setFeePercent",
+    "setBuyFee",
+    "setSellFee",
 ]
 
 
@@ -33,6 +46,6 @@ def scan(functions):
     return create_report(
         "Tax Functions",
         "PASS",
-        "HIGH",
-        "No tax-related functions detected."
+        "LOW",
+        "No recognized tax functions were found in the ABI; custom fee logic may not be detected."
     )
